@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from backend.api import actions, config_api, health, history, sessions, stream
+from backend.config import STATE_DB, load_config
+from backend.detectors.filesystem_watch import FilesystemWatcher
+from backend.detectors.linker import LinkerState, build_sessions
+from backend.models import ClaudeSession
+from backend.state import State
+
+log = logging.getLogger("claudewatch")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+
+@dataclass
+class AppState:
+    config: dict[str, Any]
+    sessions: dict[int, ClaudeSession] = field(default_factory=dict)
+    sessions_started_at: dict[int, Any] = field(default_factory=dict)
+    linker_state: LinkerState = field(default_factory=LinkerState)
+    fs_watcher: FilesystemWatcher | None = None
+    state: State | None = None
+    sse_queues: set[asyncio.Queue] = field(default_factory=set)
+
+    async def broadcast(self, event: dict) -> None:
+        dead = []
+        for q in list(self.sse_queues):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for d in dead:
+            self.sse_queues.discard(d)
+
+
+async def _scheduler_loop(s: AppState) -> None:
+    interval = float(s.config.get("process_scan_interval_seconds", 2))
+    while True:
+        try:
+            new_sessions = await build_sessions(s.config, s.linker_state, s.fs_watcher)
+            prev = s.sessions
+            new_map = {x.pid: x for x in new_sessions}
+
+            # Detect new + ended + persist
+            for pid, sess in new_map.items():
+                if pid not in prev:
+                    await s.broadcast({"event": "session.started", "session": sess.model_dump(mode="json")})
+                    s.sessions_started_at[pid] = sess.started_at
+                else:
+                    await s.broadcast({"event": "session.updated", "session": sess.model_dump(mode="json")})
+                if s.state:
+                    await s.state.upsert_active(sess)
+
+            for pid in list(prev.keys()):
+                if pid not in new_map:
+                    await s.broadcast({"event": "session.ended", "pid": pid})
+                    if s.state:
+                        started = s.sessions_started_at.pop(pid, prev[pid].started_at)
+                        await s.state.mark_ended(pid, started)
+
+            s.sessions = new_map
+
+            if s.fs_watcher:
+                cwds = {x.cwd for x in new_sessions if x.cwd}
+                await s.fs_watcher.sync_active_cwds(cwds)
+        except Exception as e:  # noqa: BLE001
+            log.exception("scheduler iteration failed: %s", e)
+        await asyncio.sleep(interval)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    cfg = load_config()
+    state = State(STATE_DB)
+    await state.init_db()
+    await state.prune()
+    fs_watcher = FilesystemWatcher(
+        retention_minutes=int(cfg.get("file_change_retention_minutes", 10)),
+        ignore_patterns=cfg.get("ignore_patterns", []),
+    )
+    s = AppState(config=cfg, state=state, fs_watcher=fs_watcher)
+    app.state.s = s
+    task = asyncio.create_task(_scheduler_loop(s))
+    log.info("ClaudeWatch backend started on http://127.0.0.1:%d", int(cfg.get("port", 7788)))
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await fs_watcher.stop_all()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="ClaudeWatch", version="0.2.0", lifespan=lifespan)
+    app.include_router(sessions.router)
+    app.include_router(actions.router)
+    app.include_router(stream.router)
+    app.include_router(health.router)
+    app.include_router(history.router)
+    app.include_router(config_api.router)
+
+    if FRONTEND_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+    @app.get("/")
+    async def index():
+        path = FRONTEND_DIR / "index.html"
+        if path.is_file():
+            return FileResponse(str(path))
+        return {"message": "ClaudeWatch backend running. Frontend not yet built."}
+
+    return app
+
+
+app = create_app()

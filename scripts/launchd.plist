@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Install with:
+    cp scripts/launchd.plist ~/Library/LaunchAgents/com.claudewatch.server.plist
+    sed -i '' "s|__HOME__|$HOME|g" ~/Library/LaunchAgents/com.claudewatch.server.plist
+    launchctl load ~/Library/LaunchAgents/com.claudewatch.server.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.claudewatch.server.plist
+    rm ~/Library/LaunchAgents/com.claudewatch.server.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claudewatch.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/claudewatch</string>
+        <string>start</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__HOME__/.claudewatch/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.claudewatch/logs/launchd.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
