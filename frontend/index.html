@@ -145,9 +145,10 @@
       <!-- Session cards -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <template x-for="(sess, sessIdx) in visibleSessions()" :key="sess.pid">
-          <article class="cw-session-card rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 hover:border-zinc-700 transition"
-                   :data-session-idx="sessIdx"
-                   :class="sessIdx === selectedPidIdx ? 'cw-selected' : ''">
+          <article class="cw-session-card rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 hover:border-zinc-700 transition cursor-pointer"
+                   :data-session-pid="sess.pid"
+                   @click="selectedPid = sess.pid"
+                   :class="sess.pid === selectedPid ? 'cw-selected ring-2 ring-emerald-500' : ''">
             <header class="flex items-start justify-between gap-3 mb-3">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="size-2 rounded-full"
@@ -317,19 +318,23 @@
             </div>
 
             <footer class="flex items-center gap-2 mt-4 pt-3 border-t border-zinc-800">
-              <button @click="focusSession(sess)" :disabled="sess.location_type==='headless'"
+              <button @click.stop="focusSession(sess)" :disabled="sess.location_type==='headless'"
                       class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed">
                 Focus
               </button>
-              <button @click="detailPid=sess.pid; loadDetail(sess.pid)"
+              <button @click.stop="detailPid=sess.pid; loadDetail(sess.pid)"
                       class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700">
                 Details
               </button>
-              <button @click="haltSession(sess)" class="text-xs px-2 py-1 rounded bg-rose-900/40 text-rose-200 hover:bg-rose-900/70">
+              <button @click.stop="openChat(sess.pid); selectedPid = sess.pid"
+                      class="text-xs px-2 py-1 rounded bg-emerald-900/40 text-emerald-200 hover:bg-emerald-900/70">
+                Chat
+              </button>
+              <button @click.stop="haltSession(sess)" class="text-xs px-2 py-1 rounded bg-rose-900/40 text-rose-200 hover:bg-rose-900/70">
                 Halt
               </button>
               <div class="flex-1"></div>
-              <button @click="openNewFromCwd(sess.cwd)" class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700">+ here</button>
+              <button @click.stop="openNewFromCwd(sess.cwd)" class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700">+ here</button>
             </footer>
           </article>
         </template>
@@ -470,6 +475,22 @@
           <label class="flex items-center gap-2"><input type="radio" value="comfortable" x-model="density" @change="saveDensity()"> Comfortable</label>
           <label class="flex items-center gap-2"><input type="radio" value="compact" x-model="density" @change="saveDensity()"> Compact</label>
         </div>
+      </section>
+
+      <!-- Remote control -->
+      <section id="settings-remote-control">
+        <h3 class="text-lg font-medium mb-2">Remote control</h3>
+        <p class="text-sm text-zinc-400 mb-3">
+          When enabled, you can type into any session's chat panel and the text is forwarded to its iTerm
+          session as if you typed it. Off by default for safety.
+        </p>
+        <label class="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40">
+          <span class="text-sm">Allow sending messages to live Claude sessions from the dashboard</span>
+          <input type="checkbox"
+                 x-model="config.remote_control.enabled"
+                 @change="saveRemoteControl()"
+                 class="size-4 accent-emerald-500" />
+        </label>
       </section>
 
       <!-- F9 Notifications -->
@@ -617,6 +638,160 @@
         <div class="flex justify-end gap-2">
           <button @click="closeNoteEditor()" class="px-3 py-1.5 rounded text-sm text-zinc-300 hover:text-white">Cancel</button>
           <button @click="saveNoteEditor()" class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat panel (live conversation read + send) -->
+  <template x-if="chatPanelPid !== null">
+    <div class="fixed inset-0 z-40 pointer-events-none">
+      <!-- backdrop -->
+      <div class="absolute inset-0 bg-black/40 pointer-events-auto"
+           @click="closeChat()"></div>
+      <!-- right-side drawer -->
+      <aside class="absolute right-0 top-0 h-full w-full sm:w-[480px] bg-zinc-950 border-l border-zinc-800 shadow-2xl flex flex-col pointer-events-auto"
+             @click.stop>
+        <header class="flex items-center justify-between gap-3 px-4 py-3 border-b border-zinc-800 shrink-0">
+          <div class="min-w-0">
+            <div class="text-sm font-semibold flex items-center gap-2">
+              <span class="text-emerald-300">Chat</span>
+              <span class="text-zinc-500 text-xs font-mono">PID <span x-text="chatPanelPid"></span></span>
+            </div>
+            <template x-if="(sessions.find(s => s.pid === chatPanelPid))">
+              <div class="text-[11px] text-zinc-500 font-mono truncate"
+                   x-text="(sessions.find(s => s.pid === chatPanelPid) || {}).cwd || ''"></div>
+            </template>
+          </div>
+          <button @click="closeChat()" class="text-zinc-400 hover:text-white text-lg leading-none px-2">×</button>
+        </header>
+
+        <!-- error inline -->
+        <template x-if="chatError">
+          <div class="px-4 py-2 text-xs bg-rose-950/50 border-b border-rose-900/60 text-rose-200">
+            <span x-text="chatError"></span>
+            <button class="float-right text-rose-300 hover:text-white" @click="chatError = null">×</button>
+          </div>
+        </template>
+
+        <!-- entries -->
+        <div id="cw-chat-scroll" class="flex-1 overflow-y-auto p-3 space-y-2 text-sm">
+          <template x-if="!chatEntries.length">
+            <div class="text-zinc-500 text-xs text-center py-12">Waiting for messages…</div>
+          </template>
+          <template x-for="(entry, i) in chatEntries" :key="chatEntryKey(entry, i)">
+            <div>
+              <!-- redacted -->
+              <template x-if="chatEntryIsRedacted(entry)">
+                <div class="text-[11px] text-zinc-500 italic px-2 py-1.5 rounded bg-zinc-900/60 border border-zinc-800">
+                  [content hidden by privacy_mode]
+                </div>
+              </template>
+
+              <!-- user -->
+              <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'user' && chatEntryText(entry)">
+                <div class="flex justify-end">
+                  <div class="max-w-[85%] rounded-lg px-3 py-2 bg-sky-900/40 border border-sky-800/60 text-sky-100 whitespace-pre-wrap break-words">
+                    <div class="text-[10px] uppercase tracking-wide text-sky-300/70 mb-0.5">user</div>
+                    <span x-text="chatEntryText(entry)"></span>
+                  </div>
+                </div>
+              </template>
+
+              <!-- assistant text -->
+              <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'assistant' && chatEntryText(entry)">
+                <div class="flex justify-start">
+                  <div class="max-w-[90%] rounded-lg px-3 py-2 bg-emerald-950/40 border border-emerald-900/60 text-emerald-100 whitespace-pre-wrap break-words">
+                    <div class="text-[10px] uppercase tracking-wide text-emerald-300/70 mb-0.5">assistant</div>
+                    <span x-text="chatEntryText(entry)"></span>
+                  </div>
+                </div>
+              </template>
+
+              <!-- assistant tool_use chips -->
+              <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'assistant' && chatEntryToolUses(entry).length">
+                <div class="flex flex-wrap gap-1.5 mt-1">
+                  <template x-for="(tu, j) in chatEntryToolUses(entry)" :key="j">
+                    <span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono"
+                          :title="tu.summary">
+                      <span>🔧</span>
+                      <span x-text="tu.name"></span>
+                      <template x-if="tu.summary">
+                        <span class="text-zinc-400 truncate max-w-[200px]" x-text="tu.summary"></span>
+                      </template>
+                    </span>
+                  </template>
+                </div>
+              </template>
+
+              <!-- tool_result -->
+              <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'tool_result'">
+                <pre class="text-[11px] bg-zinc-900/70 border border-zinc-800 rounded p-2 overflow-x-auto text-zinc-300 whitespace-pre-wrap"
+                     x-text="chatEntryText(entry) || '[tool result]'"></pre>
+              </template>
+
+              <!-- system / other -->
+              <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'system'">
+                <div class="text-[11px] text-zinc-500 px-1" x-text="(entry.type || 'system') + (chatEntryText(entry) ? ' · ' + chatEntryText(entry) : '')"></div>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <!-- composer -->
+        <div class="border-t border-zinc-800 p-3 shrink-0 space-y-2">
+          <template x-if="!chatRemoteEnabled">
+            <div class="text-[12px] rounded border border-amber-700/50 bg-amber-950/30 text-amber-200 px-3 py-2 flex items-center gap-2">
+              <span>Remote control is disabled.</span>
+              <button class="underline hover:text-white"
+                      @click="closeChat(); view='settings'; $nextTick(() => { const el=document.getElementById('settings-remote-control'); if (el && el.scrollIntoView) el.scrollIntoView({behavior:'smooth', block:'start'}); })">
+                Go to Settings
+              </button>
+            </div>
+          </template>
+          <textarea x-model="chatInput"
+                    rows="3"
+                    :disabled="!chatRemoteEnabled || chatSending"
+                    @keydown.enter="if (!$event.shiftKey) { $event.preventDefault(); requestSendChat(); }"
+                    placeholder="Type a message — Enter to send, Shift+Enter for newline"
+                    class="w-full bg-zinc-900 border border-zinc-800 rounded px-3 py-2 text-sm font-mono disabled:opacity-50 focus:outline-none focus:border-emerald-500"></textarea>
+          <div class="flex items-center gap-2 text-[11px] text-zinc-500">
+            <span>⚠️ Will be sent verbatim to PID <span class="font-mono" x-text="chatPanelPid"></span></span>
+            <div class="flex-1"></div>
+            <span x-show="chatInput.length" class="font-mono" :class="chatInput.length > 4096 ? 'text-rose-400' : ''">
+              <span x-text="chatInput.length"></span>/4096
+            </span>
+            <button @click="requestSendChat()"
+                    :disabled="!chatRemoteEnabled || chatSending || !chatInput.trim() || chatInput.length > 4096"
+                    class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed">
+              <span x-text="chatSending ? 'Sending…' : 'Send'"></span>
+            </button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </template>
+
+  <!-- Confirm-once modal for first remote send -->
+  <div x-show="chatConfirmOpen" x-transition.opacity x-cloak
+       class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
+       @click.self="chatConfirmOpen = false">
+    <div class="bg-zinc-900 border border-zinc-800 rounded-xl max-w-md w-full">
+      <header class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+        <h3 class="text-sm font-semibold">Send message to live session?</h3>
+        <button @click="chatConfirmOpen = false" class="text-zinc-400 hover:text-white">×</button>
+      </header>
+      <div class="p-5 space-y-3 text-sm">
+        <p class="text-zinc-300">
+          Your text will be typed into the live Claude session at PID
+          <span class="font-mono text-emerald-300" x-text="chatPanelPid"></span> and submitted.
+        </p>
+        <p class="text-zinc-500 text-xs">
+          You won't be asked again on this device. Disable remote control in Settings any time.
+        </p>
+        <div class="flex justify-end gap-2 pt-2">
+          <button @click="chatConfirmOpen = false" class="px-3 py-1.5 rounded text-sm text-zinc-300 hover:text-white">Cancel</button>
+          <button @click="confirmAndSend()" class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm">Send</button>
         </div>
       </div>
     </div>

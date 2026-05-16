@@ -5,7 +5,7 @@ function appRoot() {
     history: [],
     stats: {},
     health: { iterm_api: null, tmux_available: null, log_dir_found: null, issues: [] },
-    config: { pricing: {}, notifications: {} },
+    config: { pricing: {}, notifications: {}, remote_control: { enabled: false } },
     filter: "All",
     filters: ["All", "iTerm", "Tmux", "Headless", "Working", "Idle", "High-cost", "Bookmarked"],
     detailPid: null,
@@ -34,10 +34,20 @@ function appRoot() {
     _searchQueryDebounced: "",
 
     // F4 - Keyboard shortcuts
-    selectedPidIdx: 0,
+    selectedPid: null,
     showShortcuts: false,
     _gPressed: false,
     _gPressedAt: 0,
+
+    // Chat panel (remote-control read+send)
+    chatPanelPid: null,
+    chatEntries: [],
+    chatInput: "",
+    chatSending: false,
+    chatRemoteEnabled: false,
+    chatError: null,
+    chatConfirmOpen: false,
+    _chatSSE: null,
 
     // F1 - subagents
     expandedSubagents: {},
@@ -207,6 +217,8 @@ function appRoot() {
         if (r.ok) {
           this.config = await r.json();
           if (!this.config.notifications) this.config.notifications = {};
+          if (!this.config.remote_control) this.config.remote_control = { enabled: false };
+          this.chatRemoteEnabled = !!(this.config.remote_control && this.config.remote_control.enabled);
           return;
         }
       } catch (e) { /* ignore */ }
@@ -222,8 +234,14 @@ function appRoot() {
         if (r.ok) {
           this.config = await r.json();
           if (!this.config.notifications) this.config.notifications = {};
+          if (!this.config.remote_control) this.config.remote_control = { enabled: false };
+          this.chatRemoteEnabled = !!(this.config.remote_control && this.config.remote_control.enabled);
         }
       } catch (e) { console.warn("save config failed", e); }
+    },
+    async saveRemoteControl() {
+      const enabled = !!(this.config.remote_control && this.config.remote_control.enabled);
+      await this.saveConfig({ remote_control: { enabled } });
     },
     async updatePricing(model, key, value) {
       const v = parseFloat(value);
@@ -712,8 +730,10 @@ function appRoot() {
       );
       // Esc closes modals (works even inside inputs to escape)
       if (e.key === "Escape") {
+        if (this.chatConfirmOpen) { this.chatConfirmOpen = false; e.preventDefault(); return; }
         if (this.showShortcuts) { this.showShortcuts = false; e.preventDefault(); return; }
         if (this.notesEditPid !== null) { this.closeNoteEditor(); e.preventDefault(); return; }
+        if (this.chatPanelPid !== null) { this.closeChat(); e.preventDefault(); return; }
         if (this.detailPid !== null) { this.detailPid = null; this.detail = null; e.preventDefault(); return; }
         if (this.showNewModal) { this.showNewModal = false; e.preventDefault(); return; }
         if (isEditable && target.blur) target.blur();
@@ -751,19 +771,16 @@ function appRoot() {
       if (this.view !== "dashboard") return;
       const list = this.visibleSessions();
       if (!list.length) return;
-      if (e.key === "j") {
-        this.selectedPidIdx = Math.min(list.length - 1, (this.selectedPidIdx || 0) + 1);
+      if (e.key === "j" || e.key === "k") {
+        let idx = list.findIndex((s) => s.pid === this.selectedPid);
+        if (idx < 0) idx = 0;
+        else idx = e.key === "j" ? Math.min(list.length - 1, idx + 1) : Math.max(0, idx - 1);
+        this.selectedPid = list[idx].pid;
         this._scrollSelectedIntoView();
         e.preventDefault();
         return;
       }
-      if (e.key === "k") {
-        this.selectedPidIdx = Math.max(0, (this.selectedPidIdx || 0) - 1);
-        this._scrollSelectedIntoView();
-        e.preventDefault();
-        return;
-      }
-      const sel = list[this.selectedPidIdx];
+      const sel = list.find((s) => s.pid === this.selectedPid);
       if (!sel) return;
       if (e.key === "Enter") {
         this.detailPid = sel.pid;
@@ -779,9 +796,199 @@ function appRoot() {
     },
     _scrollSelectedIntoView() {
       this.$nextTick && this.$nextTick(() => {
-        const el = document.querySelector(`[data-session-idx="${this.selectedPidIdx}"]`);
+        if (this.selectedPid == null) return;
+        const el = document.querySelector(`[data-session-pid="${this.selectedPid}"]`);
         if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
       });
+    },
+
+    // Chat panel (Part 2)
+    openChat(pid) {
+      if (pid == null) return;
+      this.closeChat();
+      this.chatPanelPid = pid;
+      this.chatEntries = [];
+      this.chatInput = "";
+      this.chatError = null;
+      try {
+        this._chatSSE = new EventSource(`/api/sessions/${pid}/log-stream`);
+        this._chatSSE.addEventListener("snapshot", (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            this.chatEntries = Array.isArray(data.entries) ? data.entries : [];
+            this._scrollChatToBottom();
+          } catch (err) { console.warn("chat snapshot parse failed", err); }
+        });
+        this._chatSSE.addEventListener("append", (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            const more = Array.isArray(data.entries) ? data.entries : [];
+            if (more.length) {
+              this.chatEntries.push(...more);
+              this._scrollChatToBottom();
+            }
+          } catch (err) { console.warn("chat append parse failed", err); }
+        });
+        this._chatSSE.onerror = () => {
+          // Best-effort: surface a small inline hint but don't spam top banner
+          this.chatError = "Lost connection to log stream";
+        };
+      } catch (e) {
+        this.chatError = "Failed to open log stream: " + e;
+      }
+    },
+    closeChat() {
+      if (this._chatSSE) {
+        try { this._chatSSE.close(); } catch (e) { /* ignore */ }
+        this._chatSSE = null;
+      }
+      this.chatPanelPid = null;
+      this.chatEntries = [];
+      this.chatInput = "";
+      this.chatSending = false;
+      this.chatError = null;
+      this.chatConfirmOpen = false;
+    },
+    _scrollChatToBottom() {
+      this.$nextTick && this.$nextTick(() => {
+        const el = document.getElementById("cw-chat-scroll");
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+    _hasConfirmedRemoteSend() {
+      try { return localStorage.getItem("claudewatch.confirmedRemoteSend") === "1"; }
+      catch (e) { return false; }
+    },
+    _markConfirmedRemoteSend() {
+      try { localStorage.setItem("claudewatch.confirmedRemoteSend", "1"); }
+      catch (e) { /* ignore */ }
+    },
+    requestSendChat() {
+      if (this.chatPanelPid == null) return;
+      if (!this.chatRemoteEnabled) {
+        this.chatError = "Enable remote control in Settings to send messages";
+        return;
+      }
+      const text = (this.chatInput || "").trim();
+      if (!text) return;
+      if (!this._hasConfirmedRemoteSend()) {
+        this.chatConfirmOpen = true;
+        return;
+      }
+      this.sendChat();
+    },
+    confirmAndSend() {
+      this._markConfirmedRemoteSend();
+      this.chatConfirmOpen = false;
+      this.sendChat();
+    },
+    async sendChat() {
+      if (this.chatPanelPid == null) return;
+      const pid = this.chatPanelPid;
+      const text = (this.chatInput || "").trim();
+      if (!text) return;
+      this.chatSending = true;
+      this.chatError = null;
+      let r;
+      try {
+        r = await fetch(`/api/sessions/${pid}/send-text`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, submit: true }),
+        });
+      } catch (e) {
+        this.chatError = "Network error: " + e;
+        this.chatSending = false;
+        return;
+      }
+      if (r.ok) {
+        this.chatInput = "";
+      } else if (r.status === 403) {
+        this.chatError = "Enable remote control in Settings to send messages";
+        this.chatRemoteEnabled = false;
+      } else if (r.status === 413) {
+        this.chatError = "Message too long (max 4096 chars)";
+      } else {
+        let detail = "";
+        try { const j = await r.json(); detail = j.detail || ""; } catch (e) { /* ignore */ }
+        this.chatError = `Send failed: HTTP ${r.status}${detail ? " · " + detail : ""}`;
+      }
+      this.chatSending = false;
+    },
+
+    // Rendering helpers for chat entries
+    chatEntryRole(entry) {
+      const t = entry && entry.type;
+      if (t === "user") return "user";
+      if (t === "assistant") return "assistant";
+      if (t === "tool_result" || t === "user_tool_result") return "tool_result";
+      return "system";
+    },
+    chatEntryText(entry) {
+      if (!entry) return "";
+      // Privacy mode: redacted entries come through with no text/content.
+      const msg = entry.message || {};
+      // Pure string content
+      if (typeof msg.content === "string") return msg.content;
+      // Top-level text fields some entries use
+      if (typeof entry.text === "string" && entry.text) return entry.text;
+      // Array content — concatenate text blocks
+      if (Array.isArray(msg.content)) {
+        const texts = [];
+        for (const c of msg.content) {
+          if (!c) continue;
+          if (typeof c === "string") { texts.push(c); continue; }
+          if (c.type === "text" && typeof c.text === "string") texts.push(c.text);
+          else if (c.type === "tool_result" && typeof c.content === "string") texts.push(c.content);
+        }
+        if (texts.length) return texts.join("\n");
+      }
+      return "";
+    },
+    chatEntryToolUses(entry) {
+      const msg = entry && entry.message;
+      if (!msg || !Array.isArray(msg.content)) return [];
+      const out = [];
+      for (const c of msg.content) {
+        if (c && c.type === "tool_use") {
+          let summary = "";
+          try {
+            const inp = c.input || {};
+            const keys = Object.keys(inp).slice(0, 3);
+            const parts = keys.map((k) => {
+              const v = inp[k];
+              const sv = typeof v === "string" ? v : JSON.stringify(v);
+              const short = sv && sv.length > 60 ? sv.slice(0, 60) + "…" : sv;
+              return `${k}=${short}`;
+            });
+            summary = parts.join(" ");
+          } catch (e) { /* ignore */ }
+          out.push({ name: c.name || "tool", summary });
+        }
+      }
+      return out;
+    },
+    chatEntryIsRedacted(entry) {
+      if (!entry) return false;
+      if (entry.redacted === true) return true;
+      const msg = entry.message;
+      // If we have an assistant/user entry but no message contents at all
+      if (!msg) return false;
+      const hasText = !!this.chatEntryText(entry);
+      const hasTools = this.chatEntryToolUses(entry).length > 0;
+      const hasAny = hasText || hasTools;
+      // Heuristic: an assistant/user entry that explicitly has no content blocks
+      if ((entry.type === "user" || entry.type === "assistant") && !hasAny) {
+        const c = msg.content;
+        if (c === undefined || c === null) return true;
+        if (Array.isArray(c) && c.length === 0) return true;
+        if (typeof c === "string" && c === "") return true;
+      }
+      return false;
+    },
+    chatEntryKey(entry, i) {
+      if (!entry) return `e-${i}`;
+      return entry.uuid || entry.id || entry.timestamp || `e-${i}`;
     },
   };
 }
