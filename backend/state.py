@@ -116,6 +116,73 @@ class State:
             out.append(d)
         return out
 
+    async def hourly_history(self, hours: int = 24) -> list[dict]:
+        """Return one bin per hour for the trailing ``hours`` window.
+
+        Each bin reports:
+          * ``hour`` — ISO 8601 UTC timestamp of the bin start, oldest first.
+          * ``sessions_started`` — count of rows whose ``started_at`` falls
+            inside the bin.
+          * ``tokens`` / ``cost`` — sums attributed at session end (rows whose
+            ``ended_at`` falls inside the bin). Cost is attributed at end
+            because the SQLite ``sessions`` table records the final totals
+            only when a session ends.
+
+        Empty bins are still emitted (zeros) so callers can render a stable
+        time axis.
+        """
+        await self.connect()
+        assert self._conn is not None
+        # Mirror prune()'s clamp so a bad caller can't blow up timedelta.
+        hours = min(max(int(hours), 1), 24 * 365 * 100)
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        start = now - timedelta(hours=hours - 1)
+        cutoff = start.isoformat()
+
+        # started_at counts (one row per hour)
+        started_rows = await self._conn.execute_fetchall(
+            """
+            SELECT substr(started_at, 1, 13) AS hour_key, COUNT(*) AS n
+            FROM sessions
+            WHERE started_at >= ?
+            GROUP BY hour_key
+            """,
+            (cutoff,),
+        )
+        started_map: dict[str, int] = {dict(r)["hour_key"]: dict(r)["n"] for r in started_rows}
+
+        # ended_at sums (tokens/cost attributed at end)
+        ended_rows = await self._conn.execute_fetchall(
+            """
+            SELECT substr(ended_at, 1, 13) AS hour_key,
+                   COALESCE(SUM(total_tokens), 0) AS tokens,
+                   COALESCE(SUM(cost_estimate), 0) AS cost
+            FROM sessions
+            WHERE ended_at IS NOT NULL AND ended_at >= ?
+            GROUP BY hour_key
+            """,
+            (cutoff,),
+        )
+        ended_map: dict[str, dict] = {dict(r)["hour_key"]: dict(r) for r in ended_rows}
+
+        bins: list[dict] = []
+        for i in range(hours):
+            bin_start = start + timedelta(hours=i)
+            # ISO with "Z"-style suffix; the table stores isoformat() of UTC
+            # datetimes, which yields "...+00:00". substr(...,1,13) gives
+            # "YYYY-MM-DDTHH" for both, matching cleanly.
+            hour_key = bin_start.strftime("%Y-%m-%dT%H")
+            ended = ended_map.get(hour_key, {})
+            bins.append(
+                {
+                    "hour": bin_start.isoformat().replace("+00:00", "Z"),
+                    "sessions_started": int(started_map.get(hour_key, 0)),
+                    "tokens": int(ended.get("tokens", 0) or 0),
+                    "cost": float(ended.get("cost", 0.0) or 0.0),
+                }
+            )
+        return bins
+
     async def stats_today(self) -> dict:
         await self.connect()
         assert self._conn is not None
