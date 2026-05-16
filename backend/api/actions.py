@@ -8,10 +8,13 @@ import re
 import shlex
 import signal
 import subprocess
+import time
+from collections import deque
 from pathlib import Path
 
 import psutil
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from backend.detectors.process_detector import VALUE_TAKING_FLAGS, is_claude_process
 from backend.models import NewSessionRequest, SendTextRequest
@@ -28,7 +31,64 @@ UNSAFE_VALUE_CHARS = (";", "&", "|", "`", "$", "\n", "\r", ">", "<", "\\", "\x00
 # Hard cap on /send-text payloads. The endpoint hands raw text to iTerm's
 # `async_send_text`, which would happily forward megabytes — bound it well below
 # anything a human would type so a stuck client can't flood the target session.
-SEND_TEXT_MAX_CHARS = 4096
+#
+# Issue #89: the cap used to be on ``len(text)`` (codepoints), which let a
+# payload of 4-byte UTF-8 characters (CJK, emoji) blow past the intended
+# limit by ~4x. We now bound the encoded byte length so the worst-case
+# transfer to iTerm is well-defined regardless of what's in the string.
+SEND_TEXT_MAX_BYTES = 16 * 1024  # 16 KB
+
+# Issue #88: per-PID rate limit. Bursts above this threshold within the window
+# get rejected with 429 so a stuck client or compromised browser tab can't
+# flood the target Claude session.
+SEND_TEXT_RATE_WINDOW_SECONDS = 10.0
+SEND_TEXT_RATE_MAX_REQUESTS = 5
+
+# Length of the payload preview that lands in the INFO-level audit log. Long
+# enough to be useful for forensics ("what did remote control type here?") but
+# short enough not to bloat the daemon log file. Full payload is at DEBUG.
+SEND_TEXT_AUDIT_PREVIEW_CHARS = 80
+
+# Characters that would make the audit log line hard to read or could be used
+# to forge fake log entries (newlines, ANSI escape, NULL).
+_AUDIT_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_for_log(text: str, limit: int) -> str:
+    """Return the first ``limit`` chars of ``text`` with control chars replaced.
+
+    Newlines, tabs, ANSI escape sequences, and NULL all collapse to a single
+    space so the audit log line stays on one line and can't be used to forge
+    fake log entries.
+    """
+    preview = text[:limit]
+    return _AUDIT_CONTROL_CHARS.sub(" ", preview)
+
+
+def _check_send_text_rate(state, pid: int, now: float | None = None) -> int | None:
+    """Token-bucket check for /send-text. Returns ``None`` when the request is
+    allowed, or the integer number of seconds the client should wait before
+    retrying when it is blocked.
+
+    Uses ``time.monotonic()`` so a wall-clock change can't reset the window.
+    The bucket is a ``deque`` of timestamps; entries older than the window are
+    pruned on every call so the data structure stays bounded.
+    """
+    if now is None:
+        now = time.monotonic()
+    bucket = state.send_text_rate.get(pid)
+    if bucket is None:
+        bucket = deque()
+        state.send_text_rate[pid] = bucket
+    cutoff = now - SEND_TEXT_RATE_WINDOW_SECONDS
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    if len(bucket) >= SEND_TEXT_RATE_MAX_REQUESTS:
+        oldest = bucket[0]
+        retry_after = max(1, int(SEND_TEXT_RATE_WINDOW_SECONDS - (now - oldest)) + 1)
+        return retry_after
+    bucket.append(now)
+    return None
 
 
 def _state(request: Request):
@@ -258,8 +318,30 @@ async def send_text(pid: int, body: SendTextRequest, request: Request):
         raise HTTPException(400, "session has no iTerm linkage")
 
     text = body.text
-    if len(text) > SEND_TEXT_MAX_CHARS:
-        raise HTTPException(413, f"text exceeds {SEND_TEXT_MAX_CHARS}-character limit")
+    # Issue #89: cap on byte length, not codepoint count. A payload of 4-byte
+    # UTF-8 sequences (CJK, emoji) was previously able to slip 4 KB of
+    # codepoints / 16 KB of bytes through; we now measure exactly what hits
+    # the wire.
+    text_bytes = len(text.encode("utf-8"))
+    if text_bytes > SEND_TEXT_MAX_BYTES:
+        raise HTTPException(413, f"text exceeds {SEND_TEXT_MAX_BYTES}-byte limit")
+
+    # Issue #88: per-PID rate limit. Done AFTER the basic validation above so
+    # we don't fill the bucket with malformed requests, but BEFORE any work
+    # that touches iTerm.
+    retry_after = _check_send_text_rate(s, pid)
+    if retry_after is not None:
+        log.warning(
+            "rate-limited remote send-text to PID %d (over %d/%ss)",
+            pid,
+            SEND_TEXT_RATE_MAX_REQUESTS,
+            int(SEND_TEXT_RATE_WINDOW_SECONDS),
+        )
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "send-text rate limit exceeded"},
+            headers={"Retry-After": str(retry_after)},
+        )
 
     iterm_manager = getattr(s, "iterm_manager", None)
     if iterm_manager is None:
@@ -268,11 +350,23 @@ async def send_text(pid: int, body: SendTextRequest, request: Request):
     # Build the payload up-front so the byte count we log + return reflects
     # exactly what was sent to iTerm (including the trailing newline).
     payload = text + ("\n" if body.submit else "")
+    # Issue #88: audit log. INFO level includes a sanitized preview of the
+    # payload so we can answer "what did remote control type into PID X?"
+    # without leaking the full text into the standard log.  Full payload at
+    # DEBUG for opt-in deep debugging.
+    preview = _sanitize_for_log(payload, SEND_TEXT_AUDIT_PREVIEW_CHARS)
     log.info(
-        "remote send-text to PID %d session %s: %d chars",
+        "remote send-text to PID %d session %s: %d bytes preview=%r",
         pid,
         sess.iterm_session_id,
-        len(payload),
+        len(payload.encode("utf-8")),
+        preview,
+    )
+    log.debug(
+        "remote send-text full payload for PID %d session %s: %r",
+        pid,
+        sess.iterm_session_id,
+        payload,
     )
     try:
         ok = await iterm_manager.send_text(sess.iterm_session_id, payload)
