@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Local system-wide Claude Code session monitor for macOS"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 authors = [{ name = "Omer Yasir Onal" }]
 dependencies = [
   "fastapi>=0.115",
@@ -19,6 +19,7 @@ dependencies = [
   "GitPython>=3.1",
   "aiosqlite>=0.20",
   "tomli-w>=1.0",
+  "tomli>=2.0; python_version < '3.11'",
   "pydantic>=2.10",
   "rich>=13.9",
   "typer>=0.15",
@@ -45,7 +46,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 # Conservative defaults — match current codebase style. Expand as we clean up.
@@ -56,6 +57,7 @@ ignore = [
   "B904",  # raise ... from err (verbose, low-value here)
   "UP006", # PEP 585 generics — keep `List[X]` style optional
   "UP007", # use `X | Y` — already done where it matters
+  "UP017", # `datetime.UTC` is 3.11+; we still support 3.10 (Issue #26)
 ]
 
 [tool.ruff.format]

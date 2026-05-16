@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from backend.detectors.conversation_log import parse_log
 
@@ -202,7 +202,7 @@ def test_in_flight_clears_after_recency_window(tmp_path):
         '"message":{"model":"x","content":[],"usage":{},"stop_reason":"tool_use"}}\n'
     )
     # now is 5 minutes after the entry
-    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=timezone.utc)
     pl = parse_log(f, now=now)
     assert pl.last_stop_reason == "tool_use"
     assert pl.is_in_flight is False
@@ -216,7 +216,7 @@ def test_in_flight_true_when_recent(tmp_path):
         '"message":{"model":"x","content":[],"usage":{},"stop_reason":"tool_use"}}\n'
     )
     # now is only 10s after the entry
-    now = datetime(2026, 1, 1, 0, 0, 10, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 0, 10, tzinfo=timezone.utc)
     pl = parse_log(f, now=now)
     assert pl.is_in_flight is True
 
