@@ -1,0 +1,43 @@
+name: mac
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mac/**'
+      - 'backend/**'      # backend source ships inside the .app bundle
+      - 'frontend/**'
+      - '.github/workflows/mac-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mac/**'
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/mac-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: swift build + test
+    runs-on: macos-14
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift / Xcode version
+        run: |
+          xcode-select -p
+          swift --version
+
+      - name: swift build (release)
+        working-directory: mac
+        run: swift build -c release
+
+      - name: swift test
+        working-directory: mac
+        run: swift test

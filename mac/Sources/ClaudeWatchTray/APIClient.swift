@@ -22,7 +22,7 @@ actor APIClient {
     private let decoder: JSONDecoder
     private let session: URLSession
 
-    init(port: Int = APIClient.defaultPort) {
+    init(port: Int = APIClient.defaultPort, session: URLSession? = nil) {
         self.base = URL(string: "http://127.0.0.1:\(port)")!
         let d = JSONDecoder()
         // Backend emits ISO8601 with fractional seconds + 'Z' suffix.
@@ -41,13 +41,17 @@ actor APIClient {
         }
         self.decoder = d
 
-        let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 5
-        cfg.timeoutIntervalForResource = 5
-        // Don't write cookies, don't keep credentials.
-        cfg.httpCookieAcceptPolicy = .never
-        cfg.httpShouldSetCookies = false
-        self.session = URLSession(configuration: cfg)
+        if let session {
+            self.session = session
+        } else {
+            let cfg = URLSessionConfiguration.default
+            cfg.timeoutIntervalForRequest = 5
+            cfg.timeoutIntervalForResource = 5
+            // Don't write cookies, don't keep credentials.
+            cfg.httpCookieAcceptPolicy = .never
+            cfg.httpShouldSetCookies = false
+            self.session = URLSession(configuration: cfg)
+        }
     }
 
     func listSessions() async throws -> [Session] {
