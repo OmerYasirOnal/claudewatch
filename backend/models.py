@@ -43,7 +43,7 @@ class GitContext(BaseModel):
     modified_count: int = 0
 
 
-SessionStatus = Literal["working", "waiting", "idle", "ended"]
+SessionStatus = Literal["working", "waiting", "idle"]
 LocationType = Literal["iterm", "tmux", "headless"]
 
 

@@ -152,6 +152,34 @@ def test_focus_rejects_404_for_unknown_pid(populated_app):
     assert client.post("/api/sessions/99999/focus").status_code == 404
 
 
+def test_focus_rejects_tmux_without_attached_client(populated_app, monkeypatch):
+    """Issue #12: tmux session with no attached client and no iTerm linkage
+    should return 409 instead of silently succeeding."""
+    client, fastapi_app, _ = populated_app
+    sess = list(fastapi_app.state.s.sessions.values())[0]
+    sess.location_type = "tmux"
+    sess.iterm_tty = None
+    sess.iterm_window_id = None
+    sess.iterm_tab_id = None
+    sess.tmux_session = "work"
+    sess.tmux_window = "0"
+    sess.tmux_pane = "0"
+
+    import subprocess as _sub
+
+    def fake_run(cmd, *args, **kwargs):
+        # tmux list-clients returns empty stdout = no client attached
+        if cmd[:2] == ["tmux", "list-clients"]:
+            return _sub.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {cmd}")
+
+    monkeypatch.setattr("backend.api.actions.subprocess.run", fake_run)
+
+    r = client.post(f"/api/sessions/{sess.pid}/focus")
+    assert r.status_code == 409
+    assert "detached tmux" in r.json()["detail"].lower()
+
+
 def test_halt_404_for_unknown_pid(populated_app):
     client, _, _ = populated_app
     assert client.post("/api/sessions/99999/halt").status_code == 404
