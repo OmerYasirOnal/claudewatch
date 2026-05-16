@@ -3,12 +3,28 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from backend.models import TokenUsage, ToolCallStats
 
 log = logging.getLogger(__name__)
+
+
+def _safe_int(value: Any) -> int:
+    """Coerce arbitrary JSONL field values into a non-negative int.
+
+    Conversation logs are written by the Claude CLI and have been observed to
+    contain unexpected types in `usage.*_tokens` (e.g. strings, floats, None)
+    on partial writes or schema drift. We never want session parsing to crash
+    over a single bad number — return 0 in that case (Issue #29).
+    """
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
 
 LOG_DIR_CANDIDATES = [
     Path.home() / ".claude" / "projects",
@@ -55,9 +71,15 @@ def _parse_ts(s: str | None) -> datetime | None:
     try:
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
     except ValueError:
         return None
+    # Issue #46: some log lines carry naive timestamps (no offset / no `Z`).
+    # Treat them as UTC so downstream `(now - ts)` math doesn't raise
+    # TypeError("can't subtract offset-naive and offset-aware datetimes").
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 @dataclass
@@ -96,7 +118,7 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
     tests inject a fixed value.
     """
     if now is None:
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
     pl = ParsedLog(conversation_id=path.stem, log_path=path)
     breakdown: dict[str, int] = {}
     last_tool_used: str | None = None
@@ -141,10 +163,10 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
                     if model:
                         pl.model = model
                     usage = msg.get("usage") or {}
-                    in_t = int(usage.get("input_tokens") or 0)
-                    out_t = int(usage.get("output_tokens") or 0)
-                    cr_t = int(usage.get("cache_read_input_tokens") or 0)
-                    cc_t = int(usage.get("cache_creation_input_tokens") or 0)
+                    in_t = _safe_int(usage.get("input_tokens"))
+                    out_t = _safe_int(usage.get("output_tokens"))
+                    cr_t = _safe_int(usage.get("cache_read_input_tokens"))
+                    cc_t = _safe_int(usage.get("cache_creation_input_tokens"))
                     pl.usage.input_tokens += in_t
                     pl.usage.output_tokens += out_t
                     pl.usage.cache_read_input_tokens += cr_t
