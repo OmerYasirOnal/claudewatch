@@ -24,3 +24,20 @@ async def test_state_connection_reused(tmp_path):
 
     await state.close()
     assert state._conn is None
+
+
+async def test_prune_clamps_huge_hours(tmp_path):
+    """Issue #32: a pathologically large `hours` (e.g. from a typo in config or
+    an API caller passing seconds-as-hours) used to make `timedelta(hours=N)`
+    raise OverflowError, killing the scheduler loop. State.prune now clamps
+    the value before constructing the timedelta."""
+    state = State(tmp_path / "state.db")
+    await state.init_db()
+    try:
+        # Far past int range that timedelta would normally choke on.
+        await state.prune(hours=99_999_999_999)
+        # Negative / zero gets clamped up to the 1-hour floor (still safe).
+        await state.prune(hours=0)
+        await state.prune(hours=-5)
+    finally:
+        await state.close()

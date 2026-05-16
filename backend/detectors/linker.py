@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -127,7 +127,7 @@ async def build_sessions(
     file_retention = int(config.get("file_change_retention_minutes", 10))
 
     sessions: list[ClaudeSession] = []
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
 
     for p in procs:
         cpu_history = _update_cpu_history(state, p.pid, p.cpu_percent)
