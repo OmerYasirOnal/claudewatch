@@ -258,3 +258,153 @@ def test_parse_log_multiple_subagents_ordered_by_start(tmp_path):
     pl = parse_log(f)
     assert [r.description for r in pl.subagents] == ["first", "second", "third"]
     assert [r.tool_use_id for r in pl.subagents] == ["toolu_x", "toolu_y", "toolu_z"]
+
+
+def _task_notification_entry(ts: str, body_text: str) -> str:
+    return (
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": ts,
+                "message": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": body_text,
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n"
+    )
+
+
+def test_background_subagent_uses_task_notification_for_end_time(tmp_path):
+    """Issue #66: background Agent dispatches return an immediate ACK
+    ("Async agent launched successfully. · agentId: …"). The real
+    completion arrives later in a <task-notification> user entry. The
+    parser must use THAT timestamp for ended_at / duration_seconds and
+    the <result> (or <summary>) for the preview — not the ACK text."""
+    f = tmp_path / "bg.jsonl"
+    f.write_text(
+        _agent_tool_use_entry(
+            "2026-05-16T16:56:00.000Z",
+            "toolu_bg1",
+            "Bg Job",
+            "general-purpose",
+        )
+        + _tool_result_entry(
+            "2026-05-16T16:56:00.100Z",
+            "toolu_bg1",
+            "Async agent launched successfully. · agentId: ABC123 (internal ID xyz)",
+        )
+        + _task_notification_entry(
+            "2026-05-16T16:57:00.000Z",
+            "<task-notification>\n"
+            "<task-id>ABC123</task-id>\n"
+            "<tool-use-id>toolu_bg1</tool-use-id>\n"
+            "<status>completed</status>\n"
+            '<summary>Agent "Bg Job" completed</summary>\n'
+            "<result>actual output from the background agent</result>\n"
+            "</task-notification>",
+        )
+    )
+    pl = parse_log(f)
+    assert len(pl.subagents) == 1
+    run = pl.subagents[0]
+    assert run.status == "completed"
+    assert run.ended_at == datetime(2026, 5, 16, 16, 57, 0, tzinfo=timezone.utc)
+    assert run.duration_seconds == 60
+    assert run.result_preview is not None
+    assert run.result_preview.startswith("actual output")
+    # Definitely NOT the dispatch ACK
+    assert "Async agent launched" not in run.result_preview
+
+
+def test_foreground_subagent_keeps_immediate_completion(tmp_path):
+    """A synchronous Agent tool_result (no "Async agent launched" prefix)
+    must keep using the immediate tool_result timestamp — this is the
+    existing behavior that must NOT regress."""
+    f = tmp_path / "fg.jsonl"
+    f.write_text(
+        _agent_tool_use_entry(
+            "2026-05-16T16:56:00.000Z",
+            "toolu_fg1",
+            "Fg Job",
+            "general-purpose",
+        )
+        + _tool_result_entry(
+            "2026-05-16T16:56:05.000Z",
+            "toolu_fg1",
+            "the synchronous answer",
+        )
+    )
+    pl = parse_log(f)
+    assert len(pl.subagents) == 1
+    run = pl.subagents[0]
+    assert run.status == "completed"
+    assert run.ended_at == datetime(2026, 5, 16, 16, 56, 5, tzinfo=timezone.utc)
+    assert run.duration_seconds == 5
+    assert run.result_preview == "the synchronous answer"
+
+
+def test_background_subagent_pending_when_notification_missing(tmp_path):
+    """If the dispatch ACK arrived but no <task-notification> has shown up
+    yet, the subagent must stay in `pending` with no ended_at — even
+    though a tool_result block exists."""
+    f = tmp_path / "bg_pending.jsonl"
+    f.write_text(
+        _agent_tool_use_entry(
+            "2026-05-16T16:56:00.000Z",
+            "toolu_bg2",
+            "Bg Job",
+            "general-purpose",
+        )
+        + _tool_result_entry(
+            "2026-05-16T16:56:00.100Z",
+            "toolu_bg2",
+            "Async agent launched successfully. · agentId: DEF456 (internal ID xyz)",
+        )
+    )
+    pl = parse_log(f)
+    assert len(pl.subagents) == 1
+    run = pl.subagents[0]
+    assert run.status == "pending"
+    assert run.ended_at is None
+    assert run.duration_seconds is None
+
+
+def test_task_notification_extracts_summary_when_no_result(tmp_path):
+    """When the <task-notification> has no <result> tag, fall back to
+    the <summary> text for the preview."""
+    f = tmp_path / "bg_summary.jsonl"
+    f.write_text(
+        _agent_tool_use_entry(
+            "2026-05-16T16:56:00.000Z",
+            "toolu_bg3",
+            "Bg Job",
+            "general-purpose",
+        )
+        + _tool_result_entry(
+            "2026-05-16T16:56:00.100Z",
+            "toolu_bg3",
+            "Async agent launched successfully. · agentId: GHI789 (internal ID xyz)",
+        )
+        + _task_notification_entry(
+            "2026-05-16T16:57:00.000Z",
+            "<task-notification>\n"
+            "<task-id>GHI789</task-id>\n"
+            "<status>completed</status>\n"
+            '<summary>Agent "Bg Job" completed</summary>\n'
+            "</task-notification>",
+        )
+    )
+    pl = parse_log(f)
+    assert len(pl.subagents) == 1
+    run = pl.subagents[0]
+    assert run.status == "completed"
+    assert run.duration_seconds == 60
+    assert run.result_preview is not None
+    assert "Bg Job" in run.result_preview
+    assert "Async agent launched" not in run.result_preview

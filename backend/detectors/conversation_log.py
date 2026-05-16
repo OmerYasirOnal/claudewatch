@@ -2,12 +2,32 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from backend.models import SubagentRun, TokenUsage, ToolCallStats
+
+# Issue #66: when Agent is invoked with run_in_background:true, the matching
+# tool_result is a dispatch acknowledgment, not the real completion. We
+# recognize it by the leading text and extract the agentId so we can match
+# the later <task-notification> entry.
+_ASYNC_ACK_RE = re.compile(r"Async agent launched successfully\.?\s*[·\-:]?\s*agentId:\s*([A-Za-z0-9_-]+)")
+
+# Background completions arrive as a user-entry whose serialized content
+# contains a <task-notification> block keyed by <task-id>. We parse with a
+# regex rather than a real XML parser because the surrounding text may
+# contain arbitrary characters (including unescaped angle brackets) and
+# we only need a few specific fields.
+_TASK_NOTIF_BLOCK_RE = re.compile(
+    r"<task-notification>(.*?)</task-notification>",
+    re.DOTALL,
+)
+_TASK_ID_RE = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
+_TASK_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+_TASK_RESULT_RE = re.compile(r"<result>(.*?)</result>", re.DOTALL)
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +179,10 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
     # Subagent tracking: Agent tool_use → matching tool_result by tool_use_id.
     # We keep them as a dict so we can mutate the entry when its tool_result arrives.
     subagents_by_id: dict[str, SubagentRun] = {}
+    # Issue #66: background Agent dispatches store their assigned agentId here
+    # so we can match the later <task-notification> user entry.
+    # tool_use_id → agentId
+    agent_id_by_tool_use: dict[str, str] = {}
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -191,10 +215,21 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
                     msg = entry.get("message") or {}
                     content = msg.get("content") or []
                     if isinstance(content, list):
+                        # Collect all text across this user-entry's content so we can
+                        # look for a <task-notification> block (Issue #66 — background
+                        # subagent completions are delivered this way, not as a
+                        # tool_result).
+                        notification_text_parts: list[str] = []
                         for block in content:
                             if not isinstance(block, dict):
                                 continue
-                            if block.get("type") != "tool_result":
+                            btype = block.get("type")
+                            if btype == "text":
+                                t = block.get("text")
+                                if isinstance(t, str):
+                                    notification_text_parts.append(t)
+                                continue
+                            if btype != "tool_result":
                                 continue
                             tu_id = block.get("tool_use_id")
                             if not isinstance(tu_id, str):
@@ -202,11 +237,58 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
                             run = subagents_by_id.get(tu_id)
                             if run is None:
                                 continue
+                            preview = _extract_tool_result_preview(block.get("content"))
+                            ack_match = _ASYNC_ACK_RE.search(preview or "")
+                            if ack_match:
+                                # Issue #66: background dispatch ACK — don't mark the
+                                # run as completed; remember the agentId so a later
+                                # <task-notification> entry can close it out.
+                                agent_id_by_tool_use[tu_id] = ack_match.group(1)
+                                continue
                             run.ended_at = ts
                             if ts is not None:
                                 run.duration_seconds = max(0, int((ts - run.started_at).total_seconds()))
                             run.status = "completed"
-                            run.result_preview = _extract_tool_result_preview(block.get("content"))
+                            run.result_preview = preview
+                        if notification_text_parts:
+                            joined = "\n".join(notification_text_parts)
+                            if "<task-notification>" in joined and "<task-id>" in joined:
+                                for block_match in _TASK_NOTIF_BLOCK_RE.finditer(joined):
+                                    body = block_match.group(1)
+                                    id_match = _TASK_ID_RE.search(body)
+                                    if id_match is None:
+                                        continue
+                                    agent_id = id_match.group(1)
+                                    summary_match = _TASK_SUMMARY_RE.search(body)
+                                    result_match = _TASK_RESULT_RE.search(body)
+                                    summary = summary_match.group(1) if summary_match else None
+                                    result_text = result_match.group(1) if result_match else None
+                                    # Resolve the SubagentRun whose stored agentId
+                                    # matches this <task-id>.
+                                    matched_tu_id = next(
+                                        (tu for tu, aid in agent_id_by_tool_use.items() if aid == agent_id),
+                                        None,
+                                    )
+                                    if matched_tu_id is None:
+                                        continue
+                                    run = subagents_by_id.get(matched_tu_id)
+                                    if run is None:
+                                        continue
+                                    run.ended_at = ts
+                                    if ts is not None:
+                                        run.duration_seconds = max(
+                                            0,
+                                            int((ts - run.started_at).total_seconds()),
+                                        )
+                                    run.status = "completed"
+                                    preview_src: str | None = None
+                                    if result_text and result_text.strip():
+                                        preview_src = result_text.strip()
+                                    elif summary and summary.strip():
+                                        preview_src = summary.strip()
+                                    if preview_src is not None:
+                                        preview_src = preview_src.replace("\r\n", "\n").replace("\n", " · ")
+                                        run.result_preview = preview_src[:200]
                 if etype == "assistant":
                     msg = entry.get("message") or {}
                     model = msg.get("model")
