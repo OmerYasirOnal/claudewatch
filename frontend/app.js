@@ -92,6 +92,27 @@ function appRoot() {
     tilePreviews: {},            // pid -> { entries, error }
     _tileTimer: null,
 
+    // Status tab (consumes /api/admin/*)
+    adminStatus: null,
+    adminLogs: { lines: [], path: "", size_bytes: 0, truncated: false },
+    adminLogsGrep: "",
+    adminLogsLineCount: 200,
+    adminLogsTail: false,
+    adminLogsLoading: false,
+    adminStatusError: null,
+    adminLogsError: null,
+    restartState: "idle",        // "idle" | "restarting"
+    restartConfirmOpen: false,
+    pruneHoursInput: 48,
+    _adminPollTimer: null,
+    _adminLogsGrepDebounce: null,
+    _adminPostToast: null,        // transient "Pruned N rows" message
+
+    // History tab enrichments
+    hourlyHistory: { bins: [] },
+    historyFilter: "all",         // "all" | "today" | "week" | "high-cost"
+    historyExpandedKeys: {},      // key -> bool (object so Alpine reactivity works)
+
     async init() {
       this._loadLocalPrefs();
       this._applyAppearance();
@@ -423,7 +444,15 @@ function appRoot() {
       } else {
         if (this._insightsTimer) { clearInterval(this._insightsTimer); this._insightsTimer = null; }
       }
-      if (v === "history") this.loadHistory();
+      if (v === "history") {
+        this.loadHistory();
+        this.loadHourlyHistory(24);
+      }
+      if (v === "status") {
+        this._startAdminPolling();
+      } else {
+        this._stopAdminPolling();
+      }
       if (v === "files") {
         this.loadFileChanges();
         if (this._filesTimer) clearInterval(this._filesTimer);
@@ -764,6 +793,266 @@ function appRoot() {
       }
     },
 
+    // --- Admin / Status tab ---
+    async loadAdminStatus() {
+      let r;
+      try {
+        r = await fetch("/api/admin/status");
+        if (r.ok) {
+          this.adminStatus = await r.json();
+          this.adminStatusError = null;
+          return;
+        }
+      } catch (e) {
+        this.adminStatusError = "Network error loading status";
+        return;
+      }
+      this.adminStatusError = `Failed to load /api/admin/status: HTTP ${r?.status ?? '???'}`;
+    },
+    async loadAdminLogs() {
+      const lines = Number(this.adminLogsLineCount) || 200;
+      const grep = (this.adminLogsGrep || "").trim();
+      const params = new URLSearchParams({ lines: String(lines) });
+      if (grep) params.set("grep", grep);
+      this.adminLogsLoading = true;
+      let r;
+      try {
+        r = await fetch(`/api/admin/logs?${params.toString()}`);
+        if (r.ok) {
+          this.adminLogs = await r.json();
+          this.adminLogsError = null;
+          this.adminLogsLoading = false;
+          // Scroll to bottom for tail UX
+          this.$nextTick && this.$nextTick(() => {
+            const pre = document.getElementById("admin-log-view");
+            if (pre) pre.scrollTop = pre.scrollHeight;
+          });
+          return;
+        }
+      } catch (e) {
+        this.adminLogsError = "Network error loading logs";
+        this.adminLogsLoading = false;
+        return;
+      }
+      this.adminLogsError = `Failed to load /api/admin/logs: HTTP ${r?.status ?? '???'}`;
+      this.adminLogsLoading = false;
+    },
+    onAdminLogsGrepInput(value) {
+      this.adminLogsGrep = value;
+      if (this._adminLogsGrepDebounce) clearTimeout(this._adminLogsGrepDebounce);
+      this._adminLogsGrepDebounce = setTimeout(() => this.loadAdminLogs(), 250);
+    },
+    onAdminLogsLineCountChange() {
+      this.loadAdminLogs();
+    },
+    async loadHourlyHistory(hours) {
+      const h = Number(hours) || 24;
+      let r;
+      try {
+        r = await fetch(`/api/history/hourly?hours=${h}`);
+        if (r.ok) {
+          const data = await r.json();
+          this.hourlyHistory = data && data.bins ? data : { bins: [] };
+          this.$nextTick && this.$nextTick(() => this._renderHourlyHistoryChart());
+          setTimeout(() => this._renderHourlyHistoryChart(), 50);
+          return;
+        }
+      } catch (e) {
+        // silent — chart just shows "No data"
+      }
+    },
+    _renderHourlyHistoryChart() {
+      const canvas = document.getElementById("history-bar");
+      if (!canvas) return;
+      const bins = (this.hourlyHistory && this.hourlyHistory.bins) || [];
+      const data = bins.map((b) => ({
+        label: (b.hour || "").slice(11, 13) + "h",
+        value: Number(b.sessions_started) || 0,
+      }));
+      this._drawCountBarChart(canvas, data);
+    },
+    _drawCountBarChart(canvas, data) {
+      // Like drawBarChart but for integer counts (no "$" prefix on Y axis).
+      if (!canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const W = Math.max(200, Math.floor(rect.width));
+      const H = Math.max(120, Math.floor(rect.height || 160));
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      canvas.style.width = W + "px"; canvas.style.height = H + "px";
+      const ctx = canvas.getContext("2d");
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+      const light = this.appearance === "light";
+      const axisColor = light ? "#52525b" : "#a1a1aa";
+      const gridColor = light ? "#e4e4e7" : "#27272a";
+      const barColor = "#3b82f6";
+      const padL = 30, padR = 8, padT = 10, padB = 22;
+      const innerW = W - padL - padR, innerH = H - padT - padB;
+      const max = Math.max(1, ...data.map((d) => d.value));
+      ctx.strokeStyle = gridColor; ctx.lineWidth = 1;
+      ctx.fillStyle = axisColor; ctx.font = "10px ui-sans-serif, -apple-system";
+      for (let i = 0; i <= 4; i++) {
+        const y = padT + (innerH * i) / 4;
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+        const v = Math.round(max * (1 - i / 4));
+        ctx.fillText(String(v), 2, y + 3);
+      }
+      if (!data.length) {
+        ctx.fillStyle = axisColor;
+        ctx.fillText("No data", padL + innerW / 2 - 20, padT + innerH / 2);
+        return;
+      }
+      const n = data.length;
+      const gap = 2;
+      const barW = Math.max(2, (innerW - gap * (n - 1)) / n);
+      data.forEach((d, i) => {
+        const h = max > 0 ? (d.value / max) * innerH : 0;
+        const x = padL + i * (barW + gap);
+        const y = padT + innerH - h;
+        ctx.fillStyle = barColor;
+        ctx.fillRect(x, y, barW, h);
+      });
+      ctx.fillStyle = axisColor;
+      const stride = Math.max(1, Math.ceil(n / 8));
+      data.forEach((d, i) => {
+        if (i % stride !== 0) return;
+        const x = padL + i * (barW + gap) + barW / 2;
+        const label = d.label || "";
+        const w = ctx.measureText(label).width;
+        ctx.fillText(label, x - w / 2, H - 6);
+      });
+    },
+    _startAdminPolling() {
+      // Initial fetches
+      this.loadAdminStatus();
+      this.loadAdminLogs();
+      if (this._adminPollTimer) return;
+      this._adminPollTimer = setInterval(() => {
+        if (this.view !== "status") return;
+        this.loadAdminStatus();
+        if (this.adminLogsTail) this.loadAdminLogs();
+      }, 5000);
+    },
+    _stopAdminPolling() {
+      if (this._adminPollTimer) {
+        clearInterval(this._adminPollTimer);
+        this._adminPollTimer = null;
+      }
+    },
+    async restartDaemon() {
+      this.restartConfirmOpen = false;
+      this.restartState = "restarting";
+      this._setError("Backend restarting… reconnecting");
+      try {
+        await fetch("/api/admin/restart?confirm=true", { method: "POST" });
+      } catch (e) {
+        // Even if the connection tears mid-flight that's expected — keep polling.
+      }
+      // Poll /api/health up to ~10s waiting for the daemon to come back.
+      let ok = false;
+      for (let i = 0; i < 50; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        try {
+          const r = await fetch("/api/health");
+          if (r && r.ok) { ok = true; break; }
+        } catch (e) { /* still restarting */ }
+      }
+      this.restartState = "idle";
+      if (ok) {
+        this.errorBanner = null;
+        this.loadAdminStatus();
+        this.loadAdminLogs();
+      } else {
+        this._setError("Restart timed out waiting for daemon to come back");
+      }
+    },
+    requestRestart() {
+      this.restartConfirmOpen = true;
+    },
+    async pruneNow(hours) {
+      const h = Number(hours) || 48;
+      if (!confirm(`Delete sessions older than ${h}h from the history DB?`)) return;
+      let r;
+      try {
+        r = await fetch(`/api/admin/prune?hours=${h}`, { method: "POST" });
+      } catch (e) {
+        alert("Prune failed: " + e);
+        return;
+      }
+      if (!r.ok) {
+        let detail = "";
+        try { const j = await r.json(); detail = j.detail || ""; } catch (e) { /* ignore */ }
+        alert(`Prune failed: HTTP ${r.status}${detail ? " · " + detail : ""}`);
+        return;
+      }
+      const data = await r.json().catch(() => ({}));
+      const n = data && typeof data.rows_deleted === "number" ? data.rows_deleted : 0;
+      this._adminPostToast = `Pruned ${n} row${n === 1 ? "" : "s"}`;
+      setTimeout(() => { this._adminPostToast = null; }, 3000);
+      // Refresh dependent views
+      this.loadAdminStatus();
+      this.loadHistory();
+      this.loadHourlyHistory(24);
+    },
+
+    // --- History tab enrichments ---
+    historyKey(h) {
+      if (!h) return "";
+      return `${h.pid}|${h.started_at || ""}`;
+    },
+    toggleHistoryRow(h) {
+      const k = this.historyKey(h);
+      this.historyExpandedKeys[k] = !this.historyExpandedKeys[k];
+    },
+    isHistoryRowExpanded(h) {
+      return !!this.historyExpandedKeys[this.historyKey(h)];
+    },
+    historySummaryJson(h) {
+      try {
+        return JSON.stringify(h && h.summary != null ? h.summary : h, null, 2);
+      } catch (e) {
+        return "{}";
+      }
+    },
+    visibleHistory() {
+      const arr = Array.isArray(this.history) ? [...this.history] : [];
+      const now = Date.now();
+      const oneDay = 24 * 3600 * 1000;
+      const oneWeek = 7 * oneDay;
+      switch (this.historyFilter) {
+        case "today":
+          return arr.filter((h) => {
+            const t = h.ended_at ? new Date(h.ended_at).getTime() : 0;
+            return t && now - t <= oneDay;
+          });
+        case "week":
+          return arr.filter((h) => {
+            const t = h.ended_at ? new Date(h.ended_at).getTime() : 0;
+            return t && now - t <= oneWeek;
+          });
+        case "high-cost":
+          return arr.filter((h) => Number(h.cost_estimate || 0) >= 1.0);
+        default:
+          return arr;
+      }
+    },
+    historyFmtBytes(n) {
+      const v = Number(n) || 0;
+      if (v < 1024) return v + " B";
+      if (v < 1024 * 1024) return (v / 1024).toFixed(1) + " KB";
+      if (v < 1024 * 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + " MB";
+      return (v / 1024 / 1024 / 1024).toFixed(2) + " GB";
+    },
+    adminLogLineClass(line) {
+      if (!line) return "text-zinc-400";
+      const s = String(line);
+      if (/\bERROR\b|\bCRITICAL\b/.test(s)) return "text-rose-300";
+      if (/\bWARN(?:ING)?\b/.test(s)) return "text-amber-300";
+      if (/\bDEBUG\b/.test(s)) return "text-zinc-500";
+      return "text-zinc-300";
+    },
+
     connectSSE() {
       try {
         this._sse = new EventSource("/api/stream");
@@ -1099,6 +1388,7 @@ function appRoot() {
           this._gPressed = false; e.preventDefault(); return;
         }
         if (e.key === "s") { this.switchView("settings"); this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "t") { this.switchView("status"); this._gPressed = false; e.preventDefault(); return; }
         this._gPressed = false;
       }
       // Dashboard-specific
