@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +32,22 @@ class RemoteControlUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class EditorConfig(BaseModel):
+    # Sub-block for the opt-in "open in editor" action used by POST
+    # /api/files/open. The pattern below is intentionally narrow: a shell-safe
+    # subset of characters (no metacharacters like ;|&$<>) so a localhost
+    # attacker can't smuggle a command line through the validator. The real
+    # invocation also bypasses the shell (subprocess.Popen with a list argv).
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    command: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_/.\- ]+$",
+        max_length=128,
+    )
+
+
 class ConfigUpdate(BaseModel):
     # extra="forbid": unknown keys -> 422. Prevents a localhost attacker (or a
     # DNS-rebound page; see #39) from planting random config keys that future
@@ -42,12 +58,14 @@ class ConfigUpdate(BaseModel):
     read_only: bool | None = None
     privacy_mode: bool | None = None
     show_log_text: bool | None = None
+    plan: Literal["api", "pro", "max", "max_20x", "team", "free"] | None = None
     file_change_retention_minutes: int | None = Field(default=None, ge=1, le=1440)
     process_scan_interval_seconds: float | None = Field(default=None, gt=0, le=60)
     iterm_refresh_interval_seconds: float | None = Field(default=None, gt=0, le=60)
     ignore_patterns: list[str] | None = None
     pricing: dict[str, PricingEntry] | None = None
     remote_control: RemoteControlUpdate | None = None
+    editor: EditorConfig | None = None
 
 
 @router.get("/config")
