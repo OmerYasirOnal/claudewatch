@@ -2,16 +2,56 @@ import SwiftUI
 
 struct MenuBarContent: View {
     @ObservedObject var vm: AppViewModel
+    @ObservedObject var runner: PythonRunner
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            backendStatusBar
             Divider()
             sessionList
             Divider()
             footer
         }
         .frame(width: 380)
+        .task {
+            // Kick off bundled-backend startup the first time the popover opens.
+            // Idempotent — won't re-launch if already running or external.
+            await runner.startIfNeeded()
+        }
+    }
+
+    @ViewBuilder
+    private var backendStatusBar: some View {
+        switch runner.state {
+        case .idle, .checking:
+            statusRow(color: .gray, icon: "circle.dotted", text: "Connecting to backend…")
+        case .launching:
+            statusRow(color: .yellow, icon: "bolt", text: "Starting bundled backend…")
+        case .running(let pid):
+            statusRow(color: .green, icon: "checkmark.circle.fill",
+                      text: "Backend running (PID \(pid))")
+        case .external:
+            statusRow(color: .blue, icon: "link",
+                      text: "Backend already running (external daemon)")
+        case .failed(let msg):
+            statusRow(color: .red, icon: "exclamationmark.triangle.fill",
+                      text: "Backend failed: \(msg)")
+        }
+    }
+
+    private func statusRow(color: Color, icon: String, text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).foregroundStyle(color)
+            Text(text)
+                .font(.caption)
+                .lineLimit(2)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(color.opacity(0.06))
     }
 
     private var header: some View {
@@ -97,6 +137,15 @@ struct MenuBarContent: View {
 
             Spacer()
 
+            Button {
+                vm.openSettings()
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .help("Settings (⌘,)")
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
             Button("Refresh") {
                 Task { await vm.refresh() }
             }
@@ -108,6 +157,7 @@ struct MenuBarContent: View {
             } label: {
                 Image(systemName: "power")
             }
+            .help("Quit")
             .buttonStyle(.bordered)
             .controlSize(.small)
         }

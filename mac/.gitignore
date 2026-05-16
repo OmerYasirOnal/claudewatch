@@ -2,5 +2,6 @@
 .swiftpm/
 Package.resolved
 dist/
+build/
 *.xcodeproj
 xcuserdata/

@@ -66,6 +66,26 @@ actor APIClient {
         try await post("/api/sessions/\(pid)/halt")
     }
 
+    func getConfig() async throws -> AppConfig {
+        return try await get("/api/config")
+    }
+
+    /// POST a JSON dictionary payload to /api/config. Caller must hand-build the dict
+    /// since the backend accepts a deep-merge of any subset.
+    func postConfig(_ payload: [String: Any]) async throws {
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var req = URLRequest(url: base.appendingPathComponent("/api/config"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        do {
+            let (_, response) = try await session.data(for: req)
+            guard let http = response as? HTTPURLResponse else { throw APIError.http(-1) }
+            guard (200..<300).contains(http.statusCode) else { throw APIError.http(http.statusCode) }
+        } catch let e as APIError { throw e }
+        catch { throw APIError.transport(error) }
+    }
+
     // MARK: - internals
 
     private func get<T: Decodable>(_ path: String) async throws -> T {

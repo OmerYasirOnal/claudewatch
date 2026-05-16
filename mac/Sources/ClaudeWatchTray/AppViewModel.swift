@@ -81,6 +81,19 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    /// Opens the native Settings window. Uses the @Environment(\\.openSettings)
+    /// path via Scene's Settings — implemented by closing the menu bar popover
+    /// and sending the standard Settings menu action.
+    func openSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        // macOS 14+ uses showSettingsWindow:; older uses showPreferencesWindow:
+        if NSApp.responds(to: Selector(("showSettingsWindow:"))) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
+    }
+
     func quit() {
         NSApplication.shared.terminate(nil)
     }
