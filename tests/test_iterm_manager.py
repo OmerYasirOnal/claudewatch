@@ -17,6 +17,7 @@ class _FakeSession:
         self.session_id = session_id
         self._vars = {"jobPid": job_pid}
         self.async_activate = AsyncMock()
+        self.async_send_text = AsyncMock()
 
     async def async_get_variable(self, name: str):
         return self._vars.get(name)
@@ -295,6 +296,87 @@ async def test_focus_session_returns_false_when_not_found():
     window.async_activate.assert_not_awaited()
     tab.async_select.assert_not_awaited()
     session.async_activate.assert_not_awaited()
+
+
+async def test_send_text_finds_session_and_sends():
+    """send_text walks the app tree and calls async_send_text exactly once."""
+    mgr = ItermConnectionManager()
+    fake_conn = MagicMock()
+    app = _make_fake_app(job_pid=1)
+    session = app.windows[0].tabs[0].sessions[0]
+
+    with (
+        patch.object(
+            iterm_detector.iterm2.Connection,
+            "async_create",
+            new=AsyncMock(return_value=fake_conn),
+        ),
+        patch.object(
+            iterm_detector.iterm2,
+            "async_get_app",
+            new=AsyncMock(return_value=app),
+        ),
+    ):
+        result = await mgr.send_text(session.session_id, "hello")
+
+    assert result is True
+    session.async_send_text.assert_awaited_once_with("hello")
+
+
+async def test_send_text_returns_false_when_not_found():
+    """An unknown session_id must not send to any other session."""
+    mgr = ItermConnectionManager()
+    fake_conn = MagicMock()
+    app = _make_fake_app(job_pid=1)
+    session = app.windows[0].tabs[0].sessions[0]
+
+    with (
+        patch.object(
+            iterm_detector.iterm2.Connection,
+            "async_create",
+            new=AsyncMock(return_value=fake_conn),
+        ),
+        patch.object(
+            iterm_detector.iterm2,
+            "async_get_app",
+            new=AsyncMock(return_value=app),
+        ),
+    ):
+        result = await mgr.send_text("sess-does-not-exist", "hello")
+
+    assert result is False
+    session.async_send_text.assert_not_awaited()
+
+
+async def test_send_text_drops_connection_on_error():
+    """Like focus_session: an exception drops the connection + sets backoff."""
+    mgr = ItermConnectionManager()
+    fake_conn = MagicMock()
+    with (
+        patch.object(
+            iterm_detector.iterm2.Connection,
+            "async_create",
+            new=AsyncMock(return_value=fake_conn),
+        ),
+        patch.object(
+            iterm_detector.iterm2,
+            "async_get_app",
+            new=AsyncMock(return_value=_make_fake_app(job_pid=1)),
+        ),
+    ):
+        await mgr.get_sessions()
+    assert mgr.connected is True
+
+    before = mgr._last_error_at
+    with patch.object(
+        iterm_detector.iterm2,
+        "async_get_app",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        result = await mgr.send_text("anything", "x")
+    assert result is False
+    assert mgr.connected is False
+    assert mgr._last_error_at > before
 
 
 async def test_focus_session_drops_connection_on_error():

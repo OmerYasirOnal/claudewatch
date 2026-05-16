@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -123,6 +124,148 @@ def _session_hash(sess: ClaudeSession) -> str:
     return hashlib.sha256(sess.model_dump_json(exclude=_DIFF_EXCLUDE).encode()).hexdigest()
 
 
+# Max bytes read off the end of the conversation log when sniffing the last
+# assistant text — bounds the work this does so notifications can't be slowed
+# by a multi-GB JSONL.
+_LAST_ASSISTANT_TAIL_BYTES = 256 * 1024
+# Max characters of assistant content surfaced in the notification body.
+_NOTIFICATION_PREVIEW_CHARS = 120
+
+
+def _project_name(cwd: str | None) -> str:
+    """Friendly project label for notifications — basename of cwd, or fallback."""
+    if not cwd:
+        return "(unknown)"
+    try:
+        name = Path(cwd).name
+    except (TypeError, ValueError):
+        return "(unknown)"
+    return name or "(unknown)"
+
+
+def _format_duration(seconds: int | float | None) -> str:
+    """Render a duration as '5m 23s' / '1h 02m' / '12s'."""
+    try:
+        total = int(seconds or 0)
+    except (TypeError, ValueError):
+        total = 0
+    if total < 0:
+        total = 0
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        m, s = divmod(total, 60)
+        return f"{m}m {s:02d}s"
+    h, rem = divmod(total, 3600)
+    m, _ = divmod(rem, 60)
+    return f"{h}h {m:02d}m"
+
+
+def _last_assistant_text_blocking(path: Path) -> str | None:
+    """Read the tail of ``path`` and return the last assistant message's first
+    text block (truncated). Blocking — wrap in ``asyncio.to_thread`` to call.
+    """
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            if size > _LAST_ASSISTANT_TAIL_BYTES:
+                f.seek(-_LAST_ASSISTANT_TAIL_BYTES, 2)
+                f.readline()  # discard partial line
+            raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    # Walk lines bottom-up to find the most recent assistant entry with text.
+    for line in reversed(raw.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") != "assistant":
+            continue
+        msg = entry.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                cleaned = text.strip().replace("\r\n", "\n").replace("\n", " · ")
+                if len(cleaned) > _NOTIFICATION_PREVIEW_CHARS:
+                    cleaned = cleaned[: _NOTIFICATION_PREVIEW_CHARS - 1].rstrip() + "…"
+                return cleaned
+    return None
+
+
+async def _last_assistant_text(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    return await asyncio.to_thread(_last_assistant_text_blocking, path)
+
+
+def _format_session_end(
+    sess: ClaudeSession,
+    preview: str | None = None,
+) -> tuple[str, str, str]:
+    """Return (title, subtitle, message) strings for a session-end notification."""
+    project = _project_name(sess.cwd)
+    title = f"✅ Claude finished: {project}"
+
+    model = sess.model or "(unknown model)"
+    duration = _format_duration(sess.duration_seconds)
+    cost = (sess.usage.cost_estimate_usd if sess.usage else None) or 0.0
+    subtitle = f"{model}  ·  ${cost:.2f}  ·  {duration}"
+
+    if preview:
+        message = preview
+    else:
+        total_tokens = sess.usage.total_tokens if sess.usage else 0
+        message = f"{sess.message_count} messages, {total_tokens} tokens"
+    return title, subtitle, message
+
+
+def _format_high_cost(sess: ClaudeSession) -> tuple[str, str, str]:
+    """Return (title, subtitle, message) strings for a high-cost notification."""
+    project = _project_name(sess.cwd)
+    cost = (sess.usage.cost_estimate_usd if sess.usage else None) or 0.0
+    title = f"⚠️ Claude cost: ${cost:.2f} on {project}"
+
+    model = sess.model or "(unknown model)"
+    duration = _format_duration(sess.duration_seconds)
+    subtitle = f"{model}  ·  {duration} elapsed"
+
+    if sess.current_task_subject:
+        message = sess.current_task_subject
+    else:
+        total_tokens = sess.usage.total_tokens if sess.usage else 0
+        message = f"{total_tokens} tokens used"
+    return title, subtitle, message
+
+
+async def _notify_session_end(sess: ClaudeSession, log_path: Path | None) -> None:
+    """Background task: build and fire the rich session-end notification.
+
+    Kept on a separate coroutine so the (potentially slow) log read can run
+    off the scheduler's hot path without blocking the next diff tick.
+    """
+    preview = await _last_assistant_text(log_path)
+    title, subtitle, message = _format_session_end(sess, preview)
+    await notify(
+        title=title,
+        message=message,
+        subtitle=subtitle,
+        group=f"claudewatch-end-{sess.pid}",
+    )
+
+
 async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
     """Emit started/updated/ended events with diff-aware semantics.
 
@@ -163,11 +306,13 @@ async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
                 threshold = 5.0
             cost = sess.usage.cost_estimate_usd
             if cost >= threshold:
+                title, subtitle, message = _format_high_cost(sess)
                 asyncio.create_task(
                     notify(
-                        title="Claude session: high cost",
-                        message=f"PID {pid} reached ${cost:.2f}",
-                        subtitle=sess.cwd or "",
+                        title=title,
+                        message=message,
+                        subtitle=subtitle,
+                        group=f"claudewatch-cost-{pid}",
                     )
                 )
                 s.notified_high_cost_pids.add(pid)
@@ -180,13 +325,15 @@ async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
                 started = s.sessions_started_at.pop(pid, prev[pid].started_at)
                 await s.state.mark_ended(pid, started)
             if notif_enabled and notif_cfg.get("on_session_end"):
-                duration = prev[pid].duration_seconds
+                ended_sess = prev[pid]
+                # Sniff the conversation log for a short preview of what the
+                # assistant last said. Falls back to message/token counts when
+                # the log isn't readable or contains no text blocks.
+                log_path = (
+                    Path(ended_sess.conversation_log_path) if ended_sess.conversation_log_path else None
+                )
                 asyncio.create_task(
-                    notify(
-                        title="Claude session ended",
-                        message=f"PID {pid} after {duration}s",
-                        subtitle=prev[pid].cwd or "",
-                    )
+                    _notify_session_end(ended_sess, log_path),
                 )
             s.notified_high_cost_pids.discard(pid)
 

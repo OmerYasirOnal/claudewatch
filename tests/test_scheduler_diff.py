@@ -242,10 +242,17 @@ def _notify_cfg(**overrides) -> dict:
 
 async def _drain_pending_tasks():
     """Yield to the event loop so notify create_task()s actually run their
-    monkeypatched body."""
-    # Two passes: first lets create_task schedule; second runs the body.
+    monkeypatched body. The session-end task awaits asyncio.to_thread (for
+    the log preview read), so we also wait for any non-current tasks to
+    complete before returning."""
+    # First yield a few times so create_task() bodies get scheduled.
     for _ in range(3):
         await asyncio.sleep(0)
+    # Then explicitly wait on every still-pending task (excluding ours).
+    current = asyncio.current_task()
+    pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+    if pending:
+        await asyncio.wait(pending, timeout=2.0)
 
 
 async def test_high_cost_notification_fires_once(monkeypatch):
@@ -260,9 +267,12 @@ async def test_high_cost_notification_fires_once(monkeypatch):
     await _emit_diffs(s, [_mk_sess_with_cost(pid=42, cost=5.0)])
     await _drain_pending_tasks()
     assert mock_notify.await_count == 1
-    args, kwargs = mock_notify.call_args
-    assert kwargs.get("title") == "Claude session: high cost"
-    assert "42" in kwargs.get("message", "")
+    _, kwargs = mock_notify.call_args
+    # New format: title includes warning emoji + dollar cost + project name.
+    assert kwargs.get("title", "").startswith("⚠️ Claude cost: $5.00")
+    # Subtitle carries model · duration; cwd "/tmp" → project name "tmp".
+    assert "tmp" in kwargs.get("title", "")
+    assert "elapsed" in kwargs.get("subtitle", "")
     assert 42 in s.notified_high_cost_pids
 
     # Second tick at same/higher cost: must NOT re-notify.
@@ -311,9 +321,13 @@ async def test_session_end_notification_fires(monkeypatch):
     await _emit_diffs(s, [])  # pid 42 disappears
     await _drain_pending_tasks()
     assert mock_notify.await_count == 1
-    args, kwargs = mock_notify.call_args
-    assert kwargs.get("title") == "Claude session ended"
-    assert "42" in kwargs.get("message", "")
+    _, kwargs = mock_notify.call_args
+    # New rich format: project name in title, model/cost/duration in subtitle,
+    # message falls back to "<n> messages, <n> tokens" when no log preview.
+    title = kwargs.get("title", "")
+    assert title.startswith("✅ Claude finished:")
+    assert "tmp" in title  # cwd is "/tmp" → basename "tmp"
+    assert "messages" in kwargs.get("message", "")
 
 
 async def test_session_end_clears_notified_high_cost_pid(monkeypatch):
@@ -330,6 +344,32 @@ async def test_session_end_clears_notified_high_cost_pid(monkeypatch):
     await _emit_diffs(s, [])
     await _drain_pending_tasks()
     assert 42 not in s.notified_high_cost_pids
+
+
+async def test_session_end_notification_uses_log_preview(monkeypatch, tmp_path):
+    """When the conversation log has an assistant text block, the message
+    body must be that preview (not the count-based fallback)."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+
+    s = AppState(config=_notify_cfg())
+    _collect_events(s)
+
+    log_file = tmp_path / "preview.jsonl"
+    log_file.write_text(
+        '{"type":"user","message":{"content":"hi"}}\n'
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"All done, tests are green."}]}}\n'
+    )
+    sess = _mk_sess(pid=42)
+    sess.conversation_log_path = str(log_file)
+    await _emit_diffs(s, [sess])
+    mock_notify.reset_mock()
+
+    await _emit_diffs(s, [])
+    await _drain_pending_tasks()
+    assert mock_notify.await_count == 1
+    _, kwargs = mock_notify.call_args
+    assert kwargs.get("message") == "All done, tests are green."
 
 
 async def test_session_end_notification_respects_flag(monkeypatch):

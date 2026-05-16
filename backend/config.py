@@ -47,6 +47,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "on_high_cost": True,
         "cost_threshold_usd": 5.0,
     },
+    "remote_control": {
+        # Opt-in: when False (the default), POST /api/sessions/{pid}/send-text
+        # returns 403. Flipping this gives the dashboard the ability to type
+        # text into running Claude sessions via the iTerm Python API.
+        "enabled": False,
+    },
     "pricing": {
         "claude-opus-4-7": {
             "input": 15.00,
