@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from backend.models import TokenUsage, ToolCallStats
+from backend.models import SubagentRun, TokenUsage, ToolCallStats
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +108,32 @@ class ParsedLog:
     current_task_active_form: str | None = None
     current_task_id: str | None = None
     current_task_started_at: datetime | None = None
+    subagents: list[SubagentRun] = field(default_factory=list)
+
+
+def _extract_tool_result_preview(content: Any) -> str | None:
+    """Extract a short preview from a tool_result's `content` field.
+
+    The Claude Code JSONL format stores tool_result content as either:
+      - a raw string (most tools), or
+      - a list of typed blocks like `[{"type": "text", "text": "..."}, ...]`.
+    We collapse newlines to " · " for compact single-line display and cap at
+    200 characters.
+    """
+    text: str | None = None
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = block.get("text")
+                if isinstance(t, str):
+                    text = t
+                    break
+    if text is None:
+        return None
+    text = text.strip().replace("\r\n", "\n").replace("\n", " · ")
+    return text[:200]
 
 
 def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
@@ -130,6 +156,9 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
     tasks_created_here: list[dict] = []  # [{"subject", "active_form", "ts", "local_id"}]
     current_in_progress: dict | None = None
     current_in_progress_started_at: datetime | None = None
+    # Subagent tracking: Agent tool_use → matching tool_result by tool_use_id.
+    # We keep them as a dict so we can mutate the entry when its tool_result arrives.
+    subagents_by_id: dict[str, SubagentRun] = {}
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -157,6 +186,27 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
                         pl.permission_mode = pm
                 elif etype in ("user", "assistant"):
                     pl.message_count += 1
+                if etype == "user":
+                    # Scan tool_result blocks for matches against pending Agent runs.
+                    msg = entry.get("message") or {}
+                    content = msg.get("content") or []
+                    if isinstance(content, list):
+                        for block in content:
+                            if not isinstance(block, dict):
+                                continue
+                            if block.get("type") != "tool_result":
+                                continue
+                            tu_id = block.get("tool_use_id")
+                            if not isinstance(tu_id, str):
+                                continue
+                            run = subagents_by_id.get(tu_id)
+                            if run is None:
+                                continue
+                            run.ended_at = ts
+                            if ts is not None:
+                                run.duration_seconds = max(0, int((ts - run.started_at).total_seconds()))
+                            run.status = "completed"
+                            run.result_preview = _extract_tool_result_preview(block.get("content"))
                 if etype == "assistant":
                     msg = entry.get("message") or {}
                     model = msg.get("model")
@@ -200,6 +250,16 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
                                 last_tool_used = name
                                 last_tool_used_at = ts
                                 inp = block.get("input") or {}
+                                if name == "Agent" and isinstance(inp, dict) and ts is not None:
+                                    tool_use_id = block.get("id")
+                                    if isinstance(tool_use_id, str) and tool_use_id:
+                                        subagents_by_id[tool_use_id] = SubagentRun(
+                                            tool_use_id=tool_use_id,
+                                            description=str(inp.get("description") or ""),
+                                            subagent_type=str(inp.get("subagent_type") or "general-purpose"),
+                                            started_at=ts,
+                                            status="pending",
+                                        )
                                 if name == "TaskCreate" and isinstance(inp, dict):
                                     tasks_created_here.append(
                                         {
@@ -251,6 +311,7 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
         pl.current_task_subject = current_in_progress.get("subject")
         pl.current_task_active_form = current_in_progress.get("active_form")
         pl.current_task_started_at = current_in_progress_started_at
+    pl.subagents = sorted(subagents_by_id.values(), key=lambda r: r.started_at)
     # Issue #7: a tool_use stop_reason left dangling from a user-halted session
     # would keep the UI showing "in-flight" forever. Clear it once the last
     # assistant entry is older than the recency window.

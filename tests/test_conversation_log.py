@@ -1,3 +1,5 @@
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.detectors.conversation_log import (
@@ -122,3 +124,137 @@ def test_parse_log_normalizes_naive_timestamps(tmp_path):
     assert pl.last_activity_at.tzinfo is not None
     assert pl.last_assistant_at is not None
     assert pl.last_assistant_at.tzinfo is not None
+
+
+def _agent_tool_use_entry(ts: str, tool_use_id: str, description: str, subagent_type: str) -> str:
+    return (
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": ts,
+                "message": {
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_use_id,
+                            "name": "Agent",
+                            "input": {
+                                "description": description,
+                                "subagent_type": subagent_type,
+                                "prompt": "do the thing",
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
+
+
+def _tool_result_entry(ts: str, tool_use_id: str, content) -> str:
+    return (
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": ts,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": content,
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n"
+    )
+
+
+def test_parse_log_extracts_subagent_runs(tmp_path):
+    f = tmp_path / "agent.jsonl"
+    f.write_text(
+        _agent_tool_use_entry(
+            "2026-04-15T19:16:58.000Z",
+            "toolu_aaa",
+            "X",
+            "Explore",
+        )
+        + _tool_result_entry(
+            "2026-04-15T19:17:10.000Z",
+            "toolu_aaa",
+            "the final answer here",
+        )
+    )
+    pl = parse_log(f)
+    assert len(pl.subagents) == 1
+    run = pl.subagents[0]
+    assert run.tool_use_id == "toolu_aaa"
+    assert run.description == "X"
+    assert run.subagent_type == "Explore"
+    assert run.started_at == datetime(2026, 4, 15, 19, 16, 58, tzinfo=timezone.utc)
+    assert run.ended_at == datetime(2026, 4, 15, 19, 17, 10, tzinfo=timezone.utc)
+    assert run.duration_seconds == 12
+    assert run.status == "completed"
+    assert run.result_preview == "the final answer here"
+
+
+def test_parse_log_pending_subagent_when_result_missing(tmp_path):
+    f = tmp_path / "pending.jsonl"
+    f.write_text(
+        _agent_tool_use_entry(
+            "2026-04-15T19:16:58.000Z",
+            "toolu_bbb",
+            "Investigation",
+            "Explore",
+        )
+    )
+    pl = parse_log(f)
+    assert len(pl.subagents) == 1
+    run = pl.subagents[0]
+    assert run.status == "pending"
+    assert run.ended_at is None
+    assert run.duration_seconds is None
+    assert run.result_preview is None
+
+
+def test_parse_log_subagent_result_from_list_content(tmp_path):
+    f = tmp_path / "list_content.jsonl"
+    long_text = "hello world " + ("x" * 500)
+    f.write_text(
+        _agent_tool_use_entry(
+            "2026-04-15T19:16:58.000Z",
+            "toolu_ccc",
+            "Greeter",
+            "general-purpose",
+        )
+        + _tool_result_entry(
+            "2026-04-15T19:17:00.000Z",
+            "toolu_ccc",
+            [{"type": "text", "text": long_text}],
+        )
+    )
+    pl = parse_log(f)
+    assert len(pl.subagents) == 1
+    run = pl.subagents[0]
+    assert run.status == "completed"
+    assert run.result_preview is not None
+    assert run.result_preview.startswith("hello world")
+    assert len(run.result_preview) == 200
+
+
+def test_parse_log_multiple_subagents_ordered_by_start(tmp_path):
+    f = tmp_path / "many.jsonl"
+    # Write entries out of chronological order to confirm sort is by started_at.
+    f.write_text(
+        _agent_tool_use_entry("2026-04-15T19:30:00.000Z", "toolu_z", "third", "Explore")
+        + _agent_tool_use_entry("2026-04-15T19:10:00.000Z", "toolu_x", "first", "Explore")
+        + _agent_tool_use_entry("2026-04-15T19:20:00.000Z", "toolu_y", "second", "Explore")
+    )
+    pl = parse_log(f)
+    assert [r.description for r in pl.subagents] == ["first", "second", "third"]
+    assert [r.tool_use_id for r in pl.subagents] == ["toolu_x", "toolu_y", "toolu_z"]

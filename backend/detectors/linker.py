@@ -329,6 +329,7 @@ async def build_sessions(
                 current_task_id=current_task_id,
                 current_task_started_at=current_task_started_at,
                 current_task_elapsed_seconds=current_task_elapsed,
+                subagents=parsed.subagents if parsed else [],
             )
         )
     return sessions
