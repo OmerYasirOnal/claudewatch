@@ -30,28 +30,40 @@ CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
 
 
 class State:
+    """SQLite-backed history of active + ended Claude sessions.
+
+    Holds a single long-lived ``aiosqlite`` connection for the lifetime of
+    the daemon (#19) — opened in ``connect``, closed in ``close``. All
+    public methods are coroutines and may be awaited concurrently from the
+    scheduler loop and API handlers; SQLite serialises writes internally.
+    """
+
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
+        """Open the shared connection if it isn't already open. Idempotent."""
         if self._conn is None:
             self._conn = await aiosqlite.connect(self.db_path)
             self._conn.row_factory = aiosqlite.Row
 
     async def close(self) -> None:
+        """Close the shared connection. Safe to call multiple times."""
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
 
     async def init_db(self) -> None:
+        """Create the ``sessions`` table + indexes if they don't exist yet."""
         await self.connect()
         assert self._conn is not None
         await self._conn.executescript(_SCHEMA)
         await self._conn.commit()
 
     async def upsert_active(self, session: ClaudeSession) -> None:
+        """Insert or update the row for an active session keyed by ``(pid, started_at)``."""
         await self.connect()
         assert self._conn is not None
         now = datetime.now(timezone.utc).isoformat()
@@ -84,6 +96,7 @@ class State:
         await self._conn.commit()
 
     async def mark_ended(self, pid: int, started_at: datetime) -> None:
+        """Stamp ``ended_at`` for the row identified by ``(pid, started_at)``."""
         await self.connect()
         assert self._conn is not None
         now = datetime.now(timezone.utc).isoformat()
@@ -94,6 +107,11 @@ class State:
         await self._conn.commit()
 
     async def list_history(self, hours: int = 24) -> list[dict]:
+        """Return ended sessions from the last ``hours``, newest first.
+
+        Each row is the SQLite row dict with ``summary_json`` parsed into a
+        ``summary`` dict (or ``None`` if parsing failed).
+        """
         await self.connect()
         assert self._conn is not None
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
@@ -184,6 +202,7 @@ class State:
         return bins
 
     async def stats_today(self) -> dict:
+        """Aggregate counts/sums over rows whose ``last_seen`` falls in the last 24h."""
         await self.connect()
         assert self._conn is not None
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
@@ -202,6 +221,7 @@ class State:
         return dict(row[0])
 
     async def prune(self, hours: int = 48) -> None:
+        """Delete ended rows older than ``hours`` (clamped to [1h, 100y])."""
         await self.connect()
         assert self._conn is not None
         # Issue #32: clamp to [1 hour, 100 years]. An unbounded `hours` (from a

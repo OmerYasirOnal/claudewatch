@@ -1,3 +1,11 @@
+"""Best-effort macOS notification helper.
+
+Fires ``osascript display notification`` for session-end / high-cost events
+emitted from the scheduler loop. All AppleScript string interpolation goes
+through ``_safe_as`` to escape backslashes and double quotes, since cwd /
+project names may contain them.
+"""
+
 from __future__ import annotations
 
 import asyncio
