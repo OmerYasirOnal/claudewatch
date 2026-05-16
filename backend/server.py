@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +16,15 @@ from fastapi.staticfiles import StaticFiles
 from backend.api import actions, config_api, health, history, sessions, stream
 from backend.config import STATE_DB, load_config
 from backend.detectors.filesystem_watch import FilesystemWatcher
+from backend.detectors.iterm_applescript import (
+    ItermTtyLocation,
+    link_pids_to_iterm_applescript,
+)
+from backend.detectors.iterm_detector import (
+    ItermConnectionManager,
+    ItermLocation,
+    link_pids_to_iterm,
+)
 from backend.detectors.linker import LinkerState, build_sessions
 from backend.models import ClaudeSession
 from backend.state import State
@@ -22,6 +33,13 @@ log = logging.getLogger("claudewatch")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+# How often state.prune() runs from inside the scheduler loop.
+_PRUNE_INTERVAL_SECONDS = 3600.0
+
+# Minimum gap between AppleScript fallback invocations. The AppleScript path
+# can momentarily front the iTerm window on Sonoma+, so we rate-limit hard.
+_APPLESCRIPT_MIN_INTERVAL_SECONDS = 30.0
 
 
 @dataclass
@@ -33,6 +51,17 @@ class AppState:
     fs_watcher: FilesystemWatcher | None = None
     state: State | None = None
     sse_queues: set[asyncio.Queue] = field(default_factory=set)
+    # iTerm state — populated by the dedicated iTerm refresh loop, consumed by
+    # the main scheduler loop. Keeping them on AppState avoids re-querying iTerm
+    # every tick of the (faster) main loop.
+    iterm_loc_map: dict[int, ItermLocation] = field(default_factory=dict)
+    iterm_tty_map: dict[int, ItermTtyLocation] = field(default_factory=dict)
+    iterm_manager: ItermConnectionManager | None = None
+    last_iterm_applescript_at: float = 0.0
+    # Diff cache: previous broadcast hash per pid, so session.updated only fires
+    # when the dump actually changes.
+    session_hashes: dict[int, str] = field(default_factory=dict)
+    last_prune_at: float = 0.0
 
     async def broadcast(self, event: dict) -> None:
         dead = []
@@ -45,39 +74,120 @@ class AppState:
             self.sse_queues.discard(d)
 
 
+def _session_hash(sess: ClaudeSession) -> str:
+    return hashlib.sha256(sess.model_dump_json().encode()).hexdigest()
+
+
+async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
+    """Emit started/updated/ended events with diff-aware semantics.
+
+    `session.started` and `session.ended` always fire. `session.updated` only
+    fires when the session's serialized form has changed since the last
+    broadcast (tracked via SHA-256 hash in `s.session_hashes`).
+    """
+    prev = s.sessions
+    new_map = {x.pid: x for x in new_sessions}
+
+    for pid, sess in new_map.items():
+        if pid not in prev:
+            await s.broadcast({"event": "session.started", "session": sess.model_dump(mode="json")})
+            s.sessions_started_at[pid] = sess.started_at
+            s.session_hashes[pid] = _session_hash(sess)
+        else:
+            new_hash = _session_hash(sess)
+            if s.session_hashes.get(pid) != new_hash:
+                await s.broadcast({"event": "session.updated", "session": sess.model_dump(mode="json")})
+                s.session_hashes[pid] = new_hash
+        if s.state:
+            await s.state.upsert_active(sess)
+
+    for pid in list(prev.keys()):
+        if pid not in new_map:
+            await s.broadcast({"event": "session.ended", "pid": pid})
+            s.session_hashes.pop(pid, None)
+            if s.state:
+                started = s.sessions_started_at.pop(pid, prev[pid].started_at)
+                await s.state.mark_ended(pid, started)
+
+    s.sessions = new_map
+
+
+async def _maybe_prune(s: AppState) -> None:
+    """Periodic in-loop prune. Called from the main scheduler loop, no extra timer."""
+    now = time.time()
+    if s.state is None:
+        return
+    if s.last_prune_at == 0.0:
+        # First call: set the clock without pruning (prune already ran at startup).
+        s.last_prune_at = now
+        return
+    if (now - s.last_prune_at) >= _PRUNE_INTERVAL_SECONDS:
+        try:
+            await s.state.prune()
+        finally:
+            s.last_prune_at = now
+
+
 async def _scheduler_loop(s: AppState) -> None:
     interval = float(s.config.get("process_scan_interval_seconds", 2))
     while True:
         try:
-            new_sessions = await build_sessions(s.config, s.linker_state, s.fs_watcher)
-            prev = s.sessions
-            new_map = {x.pid: x for x in new_sessions}
-
-            # Detect new + ended + persist
-            for pid, sess in new_map.items():
-                if pid not in prev:
-                    await s.broadcast({"event": "session.started", "session": sess.model_dump(mode="json")})
-                    s.sessions_started_at[pid] = sess.started_at
-                else:
-                    await s.broadcast({"event": "session.updated", "session": sess.model_dump(mode="json")})
-                if s.state:
-                    await s.state.upsert_active(sess)
-
-            for pid in list(prev.keys()):
-                if pid not in new_map:
-                    await s.broadcast({"event": "session.ended", "pid": pid})
-                    if s.state:
-                        started = s.sessions_started_at.pop(pid, prev[pid].started_at)
-                        await s.state.mark_ended(pid, started)
-
-            s.sessions = new_map
+            new_sessions = await build_sessions(
+                s.config,
+                s.linker_state,
+                s.fs_watcher,
+                iterm_loc_map=s.iterm_loc_map,
+                iterm_tty_map=s.iterm_tty_map,
+            )
+            await _emit_diffs(s, new_sessions)
 
             if s.fs_watcher:
                 cwds = {x.cwd for x in new_sessions if x.cwd}
                 await s.fs_watcher.sync_active_cwds(cwds)
+
+            await _maybe_prune(s)
         except Exception as e:  # noqa: BLE001
             log.exception("scheduler iteration failed: %s", e)
         await asyncio.sleep(interval)
+
+
+async def _iterm_refresh_loop(s: AppState) -> None:
+    """Refresh iTerm location maps on a slower, dedicated cadence.
+
+    The Python API call is the expensive/risky one (it opens a WebSocket to
+    iTerm); doing it on the same 2s cadence as the process scan was the
+    underlying cause of issue #2 (focus stealing). We run it every
+    iterm_refresh_interval_seconds (default 5s), reuse a single connection,
+    and only fall back to AppleScript when we have unlinked claude PIDs AND
+    enough time has passed since the last fallback.
+    """
+    interval = float(s.config.get("iterm_refresh_interval_seconds", 5))
+    while True:
+        try:
+            await _iterm_refresh_once(s)
+        except Exception as e:  # noqa: BLE001
+            log.exception("iterm refresh iteration failed: %s", e)
+        await asyncio.sleep(interval)
+
+
+async def _iterm_refresh_once(s: AppState) -> None:
+    if s.iterm_manager is None:
+        return
+    pids = list(s.sessions.keys())
+    # Always query the Python API via the persistent manager.
+    sess_info = await s.iterm_manager.get_sessions()
+    s.iterm_loc_map = link_pids_to_iterm(pids, sess_info) if pids else {}
+
+    # AppleScript fallback — only if there are claude PIDs that the Python API
+    # did NOT manage to link, AND we're outside the cooldown window.
+    unlinked = [pid for pid in pids if pid not in s.iterm_loc_map]
+    now = time.time()
+    if unlinked and (now - s.last_iterm_applescript_at) >= _APPLESCRIPT_MIN_INTERVAL_SECONDS:
+        s.iterm_tty_map = await asyncio.to_thread(link_pids_to_iterm_applescript, unlinked)
+        s.last_iterm_applescript_at = now
+    elif not pids:
+        # No live sessions — drop the cached tty map so we don't show stale ones.
+        s.iterm_tty_map = {}
 
 
 @asynccontextmanager
@@ -91,18 +201,29 @@ async def lifespan(app: FastAPI):
         retention_minutes=int(cfg.get("file_change_retention_minutes", 10)),
         ignore_patterns=cfg.get("ignore_patterns", []),
     )
-    s = AppState(config=cfg, state=state, fs_watcher=fs_watcher)
+    s = AppState(
+        config=cfg,
+        state=state,
+        fs_watcher=fs_watcher,
+        iterm_manager=ItermConnectionManager(),
+        last_prune_at=time.time(),
+    )
     app.state.s = s
-    task = asyncio.create_task(_scheduler_loop(s))
+    scheduler_task = asyncio.create_task(_scheduler_loop(s))
+    iterm_task = asyncio.create_task(_iterm_refresh_loop(s))
     log.info("ClaudeWatch backend started on http://127.0.0.1:%d", int(cfg.get("port", 7788)))
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        for t in (scheduler_task, iterm_task):
+            t.cancel()
+        for t in (scheduler_task, iterm_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        if s.iterm_manager is not None:
+            await s.iterm_manager.close()
         await fs_watcher.stop_all()
         await state.close()
 

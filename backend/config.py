@@ -19,10 +19,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "show_log_text": False,
     "file_change_retention_minutes": 10,
     "process_scan_interval_seconds": 2,
-    "log_scan_interval_seconds": 3,
-    "git_refresh_interval_seconds": 10,
     "iterm_refresh_interval_seconds": 5,
-    "tmux_refresh_interval_seconds": 5,
     "ignore_patterns": [
         ".git/",
         "node_modules/",

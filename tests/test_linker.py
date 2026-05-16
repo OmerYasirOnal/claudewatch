@@ -7,6 +7,8 @@ from unittest.mock import patch
 import pytest
 
 from backend.config import DEFAULT_CONFIG
+from backend.detectors.iterm_applescript import ItermTtyLocation
+from backend.detectors.iterm_detector import ItermLocation
 from backend.detectors.linker import LinkerState, build_sessions
 from backend.detectors.process_detector import ProcInfo
 from backend.detectors.tmux_detector import TmuxLocation
@@ -59,8 +61,6 @@ async def test_build_sessions_with_log_match(isolated_log_dir, monkeypatch):
     with (
         patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
         patch("backend.detectors.linker.link_pids_to_tmux", return_value={}),
-        patch("backend.detectors.linker.link_pids_to_iterm", return_value={}),
-        patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}),
     ):
         sessions = await build_sessions(DEFAULT_CONFIG, state)
 
@@ -92,8 +92,6 @@ async def test_build_sessions_with_tmux_location(isolated_log_dir):
     with (
         patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
         patch("backend.detectors.linker.link_pids_to_tmux", return_value=tmux_map),
-        patch("backend.detectors.linker.link_pids_to_iterm", return_value={}),
-        patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}),
     ):
         sessions = await build_sessions(DEFAULT_CONFIG, state)
 
@@ -122,8 +120,6 @@ async def test_build_sessions_disambiguates_two_pids_same_cwd(tmp_path):
     with (
         patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
         patch("backend.detectors.linker.link_pids_to_tmux", return_value={}),
-        patch("backend.detectors.linker.link_pids_to_iterm", return_value={}),
-        patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}),
     ):
         sessions = await build_sessions(DEFAULT_CONFIG, state)
 
@@ -136,6 +132,53 @@ async def test_build_sessions_disambiguates_two_pids_same_cwd(tmp_path):
     assert by_pid[2].model == "claude-sonnet-4-6"
 
 
+async def test_build_sessions_consumes_iterm_loc_map_arg(isolated_log_dir):
+    """build_sessions must use the iterm map passed in, never call iTerm itself."""
+    log_dir, cwd = isolated_log_dir
+    procs = [_proc(pid=5555, cwd=cwd)]
+    state = LinkerState()
+    state.log_dir = log_dir
+    iterm_map = {5555: ItermLocation(window_id=1, tab_id=2, session_id="sess-abc", tab_title="my tab")}
+
+    with (
+        patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
+        patch("backend.detectors.linker.link_pids_to_tmux", return_value={}),
+    ):
+        sessions = await build_sessions(DEFAULT_CONFIG, state, iterm_loc_map=iterm_map, iterm_tty_map={})
+
+    s = sessions[0]
+    assert s.location_type == "iterm"
+    assert s.iterm_window_id == 1
+    assert s.iterm_tab_id == 2
+    assert s.iterm_session_id == "sess-abc"
+    assert s.iterm_tab_title == "my tab"
+
+
+async def test_build_sessions_consumes_iterm_tty_map_arg(isolated_log_dir):
+    """When only the AppleScript fallback map is populated, it is used."""
+    log_dir, cwd = isolated_log_dir
+    procs = [_proc(pid=6666, cwd=cwd)]
+    state = LinkerState()
+    state.log_dir = log_dir
+    tty_map = {
+        6666: ItermTtyLocation(window_id=7, tab_index=3, tty="/dev/ttys000", unique_id="u-1", name="tab-name")
+    }
+
+    with (
+        patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
+        patch("backend.detectors.linker.link_pids_to_tmux", return_value={}),
+    ):
+        sessions = await build_sessions(DEFAULT_CONFIG, state, iterm_loc_map={}, iterm_tty_map=tty_map)
+
+    s = sessions[0]
+    assert s.location_type == "iterm"
+    assert s.iterm_window_id == 7
+    assert s.iterm_tab_index == 3
+    assert s.iterm_tty == "/dev/ttys000"
+    assert s.iterm_session_id == "u-1"
+    assert s.iterm_tab_title == "tab-name"
+
+
 async def test_build_sessions_no_log_gracefully(tmp_path):
     procs = [_proc(pid=42, cwd="/some/path/that/has/no/logs")]
     state = LinkerState()
@@ -144,8 +187,6 @@ async def test_build_sessions_no_log_gracefully(tmp_path):
     with (
         patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
         patch("backend.detectors.linker.link_pids_to_tmux", return_value={}),
-        patch("backend.detectors.linker.link_pids_to_iterm", return_value={}),
-        patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}),
     ):
         sessions = await build_sessions(DEFAULT_CONFIG, state)
 

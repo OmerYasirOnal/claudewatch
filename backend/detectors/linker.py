@@ -16,10 +16,8 @@ from backend.detectors.conversation_log import (
 )
 from backend.detectors.filesystem_watch import FilesystemWatcher
 from backend.detectors.git_context import get_git_context
-from backend.detectors.iterm_applescript import (
-    link_pids_to_iterm_applescript,
-)
-from backend.detectors.iterm_detector import link_pids_to_iterm
+from backend.detectors.iterm_applescript import ItermTtyLocation
+from backend.detectors.iterm_detector import ItermLocation
 from backend.detectors.process_detector import (
     CpuHistory,
     ProcInfo,
@@ -104,7 +102,15 @@ async def build_sessions(
     config: dict[str, Any],
     state: LinkerState,
     watcher: FilesystemWatcher | None = None,
+    iterm_loc_map: dict[int, ItermLocation] | None = None,
+    iterm_tty_map: dict[int, ItermTtyLocation] | None = None,
 ) -> list[ClaudeSession]:
+    """Build the current session snapshot.
+
+    iTerm lookups are NOT performed here — they're driven on a separate
+    cadence by the iTerm scheduler in `server.py` and passed in via the
+    `iterm_loc_map` / `iterm_tty_map` parameters.
+    """
     if state.log_dir is None:
         state.log_dir = find_log_dir()
 
@@ -113,14 +119,9 @@ async def build_sessions(
     pid_set = set(pids)
     _prune_cpu_history(state, pid_set)
 
-    # Concurrent location lookups
-    iterm_task = asyncio.create_task(link_pids_to_iterm(pids)) if pids else None
     tmux_loc_map = await asyncio.to_thread(link_pids_to_tmux, pids)
-    iterm_loc_map = await iterm_task if iterm_task else {}
-    # Fallback: AppleScript-based iTerm linking when Python API didn't link anyone.
-    iterm_tty_map: dict[int, Any] = {}
-    if pids and not iterm_loc_map:
-        iterm_tty_map = await asyncio.to_thread(link_pids_to_iterm_applescript, pids)
+    iterm_loc_map = iterm_loc_map or {}
+    iterm_tty_map = iterm_tty_map or {}
 
     pricing_cfg = config.get("pricing", {})
     file_retention = int(config.get("file_change_retention_minutes", 10))

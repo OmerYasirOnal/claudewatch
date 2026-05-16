@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 import psutil
 
@@ -15,6 +17,15 @@ except ImportError:  # pragma: no cover
     _ITERM2_AVAILABLE = False
 
 log = logging.getLogger(__name__)
+
+# After a failed iTerm Python-API call, don't retry the connection for this many
+# seconds. Prevents tight reconnect loops that can churn iTerm's WebSocket and
+# (on Sonoma+) re-activate the app in the window order.
+_RECONNECT_BACKOFF_SECONDS = 10.0
+
+# Cached results from the last successful query are considered fresh for this
+# long. During a backoff window we return the cache instead of an empty list.
+_CACHE_TTL_SECONDS = 30.0
 
 
 @dataclass
@@ -34,22 +45,60 @@ class ItermLocation:
     tab_title: str
 
 
-async def list_iterm_sessions(timeout: float = 3.0) -> list[ItermSessionInfo]:
-    """Connect to iTerm2 Python API and enumerate sessions. Returns [] on any error."""
-    if not _ITERM2_AVAILABLE:
-        return []
-    try:
-        return await asyncio.wait_for(_list_iterm_sessions_inner(), timeout=timeout)
-    except (TimeoutError, Exception) as e:  # noqa: BLE001
-        log.debug("iTerm enumeration failed: %s", e)
-        return []
+class ItermConnectionManager:
+    """Singleton-style manager for a long-lived iTerm2 Python API connection.
 
+    The previous implementation opened a fresh WebSocket every 2 seconds, which
+    on macOS Sonoma+ can cause iTerm to briefly steal window focus. This class
+    holds one connection across many `get_sessions()` calls and only tears it
+    down (with backoff) on error.
+    """
 
-async def _list_iterm_sessions_inner() -> list[ItermSessionInfo]:
-    out: list[ItermSessionInfo] = []
-    connection = await iterm2.Connection.async_create()
-    try:
-        app = await iterm2.async_get_app(connection)
+    def __init__(self) -> None:
+        self._conn: Any | None = None
+        self._last_error_at: float = 0.0
+        self._cached_sessions: list[ItermSessionInfo] = []
+        self._cached_at: float = 0.0
+        self._lock = asyncio.Lock()
+
+    @property
+    def connected(self) -> bool:
+        return self._conn is not None
+
+    async def get_sessions(self, timeout: float = 3.0) -> list[ItermSessionInfo]:
+        if not _ITERM2_AVAILABLE:
+            return []
+        # Backoff: if we recently failed and the connection is down, return the
+        # cached result (or [] if no cache). Don't try to reconnect.
+        now = time.time()
+        if self._conn is None and (now - self._last_error_at) < _RECONNECT_BACKOFF_SECONDS:
+            return self._cached_sessions_if_fresh()
+
+        async with self._lock:
+            try:
+                if self._conn is None:
+                    self._conn = await asyncio.wait_for(iterm2.Connection.async_create(), timeout=timeout)
+                sessions = await asyncio.wait_for(self._enumerate(), timeout=timeout)
+            except (TimeoutError, Exception) as e:  # noqa: BLE001
+                log.debug("iTerm enumeration failed, dropping connection: %s", e)
+                await self._drop_connection()
+                self._last_error_at = time.time()
+                return self._cached_sessions_if_fresh()
+            self._cached_sessions = sessions
+            self._cached_at = time.time()
+            return sessions
+
+    def _cached_sessions_if_fresh(self) -> list[ItermSessionInfo]:
+        if not self._cached_sessions:
+            return []
+        if (time.time() - self._cached_at) > _CACHE_TTL_SECONDS:
+            return []
+        return list(self._cached_sessions)
+
+    async def _enumerate(self) -> list[ItermSessionInfo]:
+        out: list[ItermSessionInfo] = []
+        assert self._conn is not None
+        app = await iterm2.async_get_app(self._conn)
         if app is None:
             return out
         for window in app.windows:
@@ -85,12 +134,23 @@ async def _list_iterm_sessions_inner() -> list[ItermSessionInfo]:
                             job_pid=job_pid,
                         )
                     )
-    finally:
+        return out
+
+    async def _drop_connection(self) -> None:
+        conn = self._conn
+        self._conn = None
+        if conn is None:
+            return
         try:
-            await connection.async_close()
+            await conn.async_close()
         except Exception:
             pass
-    return out
+
+    async def close(self) -> None:
+        async with self._lock:
+            await self._drop_connection()
+            self._cached_sessions = []
+            self._cached_at = 0.0
 
 
 def _ancestors(pid: int, max_depth: int = 12) -> list[int]:
@@ -111,12 +171,15 @@ def _ancestors(pid: int, max_depth: int = 12) -> list[int]:
     return chain
 
 
-async def link_pids_to_iterm(
+def link_pids_to_iterm(
     claude_pids: Iterable[int],
-    sessions: list[ItermSessionInfo] | None = None,
+    sessions: list[ItermSessionInfo],
 ) -> dict[int, ItermLocation]:
-    if sessions is None:
-        sessions = await list_iterm_sessions()
+    """Pure function: map claude PIDs to iTerm locations given pre-enumerated sessions.
+
+    Unlike previous versions, this no longer talks to iTerm itself — pass in
+    sessions from `ItermConnectionManager.get_sessions()`.
+    """
     if not sessions:
         return {}
     jobpid_to_session: dict[int, ItermSessionInfo] = {s.job_pid: s for s in sessions if s.job_pid is not None}
