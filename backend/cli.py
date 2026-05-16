@@ -68,6 +68,27 @@ def _wait_for_server_ready(url: str, timeout_s: float = 10.0, poll_interval_s: f
     return False
 
 
+def _rotate_log_if_large(log_path: Path, max_bytes: int = 10 * 1024 * 1024, keep: int = 5) -> None:
+    """Rotate ``log_path`` to ``log_path.1`` etc. when it exceeds ``max_bytes``.
+
+    Keeps the most recent ``keep`` rotated files (.1 .. .keep). The previous
+    .keep is dropped on each rotation. No-op when the file is missing or
+    smaller than ``max_bytes``.
+    """
+    if not log_path.is_file() or log_path.stat().st_size < max_bytes:
+        return
+    # Shift .keep .. .1 → .keep+1 ... but cap at `keep` by dropping the oldest first.
+    for i in range(keep, 0, -1):
+        src = log_path.with_suffix(log_path.suffix + f".{i}")
+        dst = log_path.with_suffix(log_path.suffix + f".{i + 1}")
+        if src.exists():
+            if i == keep:
+                src.unlink()  # drop the oldest
+            else:
+                src.rename(dst)
+    log_path.rename(log_path.with_suffix(log_path.suffix + ".1"))
+
+
 def _tail_file(path: Path, lines: int = 30) -> str:
     """Return the last ``lines`` lines of ``path``, or a friendly message if missing."""
     if not path.is_file():
@@ -93,6 +114,7 @@ def start(daemon: bool = typer.Option(False, "--daemon", "-d", help="Detach to b
         return
     if daemon:
         log_path = LOGS_DIR / "server.log"
+        _rotate_log_if_large(log_path)
         with open(log_path, "ab") as logf:
             proc = subprocess.Popen(
                 [
@@ -306,6 +328,62 @@ def config() -> None:
 def pricing() -> None:
     """Edit pricing (alias for `config`; the [pricing] table lives there)."""
     config()
+
+
+@app.command(name="install-daemon")
+def install_daemon() -> None:
+    """Install a launchd plist so the daemon starts at login."""
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    plist_path = plist_dir / "com.omeryasironal.claudewatch.plist"
+    plist_dir.mkdir(parents=True, exist_ok=True)
+    ensure_config_dir()
+    log_path = LOGS_DIR / "server.log"
+    err_path = LOGS_DIR / "server.err.log"
+    port = int(load_config().get("port", 7788))
+    working_dir = Path(__file__).resolve().parent.parent
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.omeryasironal.claudewatch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{sys.executable}</string>
+        <string>-m</string><string>uvicorn</string>
+        <string>backend.server:app</string>
+        <string>--host</string><string>127.0.0.1</string>
+        <string>--port</string><string>{port}</string>
+        <string>--timeout-graceful-shutdown</string><string>3</string>
+    </array>
+    <key>WorkingDirectory</key><string>{working_dir}</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>{log_path}</string>
+    <key>StandardErrorPath</key><string>{err_path}</string>
+</dict>
+</plist>
+"""
+    plist_path.write_text(plist)
+    # Try to load it (unload first in case it's already there).
+    subprocess.run(["launchctl", "unload", str(plist_path)], check=False, capture_output=True)
+    r = subprocess.run(["launchctl", "load", str(plist_path)], check=False, capture_output=True, text=True)
+    if r.returncode != 0:
+        console.print(f"[yellow]Installed but launchctl load returned: {r.stderr.strip()}[/yellow]")
+    else:
+        console.print(f"[green]Installed → {plist_path}[/green]")
+        console.print("  → claudewatch will now auto-start at login")
+
+
+@app.command(name="uninstall-daemon")
+def uninstall_daemon() -> None:
+    """Remove the launchd plist."""
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.omeryasironal.claudewatch.plist"
+    if plist_path.exists():
+        subprocess.run(["launchctl", "unload", str(plist_path)], check=False, capture_output=True)
+        plist_path.unlink()
+        console.print(f"[green]Removed {plist_path}[/green]")
+    else:
+        console.print("[yellow]Not installed[/yellow]")
 
 
 @app.command()

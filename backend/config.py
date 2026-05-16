@@ -41,6 +41,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "target/",
         ".next/",
     ],
+    "notifications": {
+        "enabled": True,
+        "on_session_end": True,
+        "on_high_cost": True,
+        "cost_threshold_usd": 5.0,
+    },
     "pricing": {
         "claude-opus-4-7": {
             "input": 15.00,
