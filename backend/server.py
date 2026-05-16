@@ -55,9 +55,7 @@ def _safe_float(value: Any, default: float, min_val: float = 0.1) -> float:
 # Honor an env var override so the bundled .app can point at its own copy of
 # frontend/ (next to site-packages/, not above it).
 _env_frontend = os.environ.get("CLAUDEWATCH_FRONTEND_DIR", "").strip()
-FRONTEND_DIR = (
-    Path(_env_frontend) if _env_frontend else Path(__file__).resolve().parent.parent / "frontend"
-)
+FRONTEND_DIR = Path(_env_frontend) if _env_frontend else Path(__file__).resolve().parent.parent / "frontend"
 
 # How often state.prune() runs from inside the scheduler loop.
 _PRUNE_INTERVAL_SECONDS = 3600.0
