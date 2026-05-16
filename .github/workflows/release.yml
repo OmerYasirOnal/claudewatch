@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # to create the GitHub release
+
+jobs:
+  build-mac:
+    name: build & release .app + .dmg
+    runs-on: macos-15
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XCODE" ] && sudo xcode-select -s "$XCODE"
+          xcode-select -p
+          swift --version
+
+      - name: Set up Python 3.12 (for the bundled backend)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install root package + deps (for bundled python install)
+        run: pip install -e .
+
+      - name: Build .app
+        working-directory: mac
+        run: make app
+
+      - name: Build .dmg
+        working-directory: mac
+        run: make dmg
+
+      - name: Generate SHA256 checksum
+        working-directory: mac
+        run: shasum -a 256 dist/ClaudeWatch.dmg > dist/ClaudeWatch.dmg.sha256
+
+      - name: Extract version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ClaudeWatch v${{ steps.ver.outputs.version }}
+          body: |
+            ## ClaudeWatch v${{ steps.ver.outputs.version }}
+
+            Native menu bar app + Python backend, bundled into a single drag-to-Applications .app.
+
+            **Install**: download `ClaudeWatch.dmg`, mount, drag to `/Applications`, double-click.
+            Verify checksum: `shasum -a 256 ClaudeWatch.dmg | diff - ClaudeWatch.dmg.sha256`
+
+            **Note**: unsigned build. Gatekeeper will warn on first launch — right-click → Open → confirm.
+            (Code-signed releases coming after Apple Developer cert enrollment; see `mac/docs/code-signing.md`.)
+
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/commits/v${{ steps.ver.outputs.version }}) for changes.
+          files: |
+            mac/dist/ClaudeWatch.dmg
+            mac/dist/ClaudeWatch.dmg.sha256
+          draft: false
+          prerelease: false
