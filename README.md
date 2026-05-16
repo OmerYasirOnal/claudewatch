@@ -37,6 +37,21 @@ operations are intentionally not supported (read-only-ish design).
 
 ## Install
 
+### Option 1 — Native .app (recommended for end users)
+
+Download the latest `ClaudeWatch.dmg` from
+[Releases](https://github.com/OmerYasirOnal/claudewatch/releases), mount it,
+and drag `ClaudeWatch.app` into your `Applications` folder. Double-click to
+launch — the 🐜 icon appears in your menu bar.
+
+Bundles a portable Python 3.12 + the backend, so you don't need to install
+anything else. ~78 MB on disk. macOS 14 (Sonoma) or newer required.
+
+See [mac/README.md](mac/README.md) for build, install, and DMG packaging
+details.
+
+### Option 2 — Python install (for development / CLI)
+
 ```bash
 git clone https://github.com/<you>/claudewatch.git
 cd claudewatch
@@ -44,10 +59,13 @@ cd claudewatch
 ```
 
 The script:
-1. Creates `.venv/` with Python 3.11+
+1. Creates `.venv/` with Python 3.10+
 2. Installs the package editable
 3. Symlinks `~/.local/bin/claudewatch` → the venv entrypoint
 4. Creates `~/.claudewatch/` for config, history, and logs
+
+Both options can coexist — the menu bar app detects an existing
+`claudewatch start --daemon` and observes it instead of double-spawning.
 
 Then grant the macOS permissions described in
 [docs/permissions-setup.md](docs/permissions-setup.md).
