@@ -64,3 +64,14 @@ def test_infer_status_waiting_when_quiet_but_recent_activity():
 def test_infer_status_empty_history():
     h = CpuHistory()
     assert infer_status(h, last_log_activity_seconds_ago=None) == "idle"
+
+
+def test_parse_cmdline_continue_does_not_swallow_next_flag():
+    out = parse_cmdline(["claude", "--continue", "--model", "claude-opus-4-7"])
+    assert out["model"] == "claude-opus-4-7"
+    assert out["extra_flags"] == ["--continue", "--model", "claude-opus-4-7"]
+
+
+def test_parse_cmdline_continue_alone():
+    out = parse_cmdline(["claude", "--continue"])
+    assert out["extra_flags"] == ["--continue"]
