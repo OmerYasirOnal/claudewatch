@@ -553,8 +553,10 @@ def test_send_text_no_submit_omits_newline(populated_app):
 
 
 def test_send_text_caps_length(populated_app):
-    """Payloads above the 4096-char cap must 413, not be forwarded."""
+    """Payloads above the byte cap must 413, not be forwarded."""
     from unittest.mock import AsyncMock
+
+    from backend.api.actions import SEND_TEXT_MAX_BYTES
 
     client, fastapi_app, sess = populated_app
     sess.iterm_session_id = "iterm-sess-zzz"
@@ -565,10 +567,158 @@ def test_send_text_caps_length(populated_app):
 
     r = client.post(
         f"/api/sessions/{sess.pid}/send-text",
-        json={"text": "x" * 4097},
+        json={"text": "x" * (SEND_TEXT_MAX_BYTES + 1)},
     )
     assert r.status_code == 413
     fake_mgr.send_text.assert_not_awaited()
+
+
+def test_send_text_caps_bytes_not_codepoints(populated_app):
+    """#89: the cap is bytes, not codepoints. A 4-byte emoji repeated 4097
+    times (≈16 KB + 4 B) blows past SEND_TEXT_MAX_BYTES and must 413, while
+    4096 ASCII chars (4096 bytes) sit comfortably below the new cap and pass.
+    """
+    from unittest.mock import AsyncMock
+
+    from backend.api.actions import SEND_TEXT_MAX_BYTES
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "iterm-sess-zzz"
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+    fake_mgr = AsyncMock()
+    fake_mgr.send_text = AsyncMock(return_value=True)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+
+    # 4-byte UTF-8 emoji: a single 🚀 is 4 bytes. 4097 * 4 = 16388 bytes.
+    emoji_payload = "🚀" * 4097
+    assert len(emoji_payload.encode("utf-8")) > SEND_TEXT_MAX_BYTES
+    r = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": emoji_payload, "submit": False},
+    )
+    assert r.status_code == 413, r.json()
+    fake_mgr.send_text.assert_not_awaited()
+
+    # 4096 ASCII chars = 4096 bytes — well under the 16 KB cap, must pass.
+    r2 = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "x" * 4096, "submit": False},
+    )
+    assert r2.status_code == 200, r2.json()
+    fake_mgr.send_text.assert_awaited_once()
+
+
+def test_send_text_rate_limits_at_6th_request_within_10s(populated_app):
+    """#88: per-PID token bucket — 5 sends in the window pass, the 6th must
+    return 429 with a ``Retry-After`` header.
+    """
+    from unittest.mock import AsyncMock
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "iterm-sess-zzz"
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+    fake_mgr = AsyncMock()
+    fake_mgr.send_text = AsyncMock(return_value=True)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+
+    # Reset the bucket between tests in case fixture re-use leaves entries.
+    fastapi_app.state.s.send_text_rate = {}
+
+    for _ in range(5):
+        r = client.post(
+            f"/api/sessions/{sess.pid}/send-text",
+            json={"text": "hi", "submit": False},
+        )
+        assert r.status_code == 200, r.json()
+
+    blocked = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "hi", "submit": False},
+    )
+    assert blocked.status_code == 429, blocked.json()
+    assert "Retry-After" in blocked.headers
+    assert int(blocked.headers["Retry-After"]) >= 1
+    # iTerm.send_text should have been called exactly 5 times, not 6.
+    assert fake_mgr.send_text.await_count == 5
+
+
+def test_send_text_rate_limit_resets_after_window(populated_app, monkeypatch):
+    """#88: once the window has elapsed, the bucket should drain and accept
+    sends again. We monkeypatch ``time.monotonic`` so we don't have to sleep
+    11s in the test.
+    """
+    from unittest.mock import AsyncMock
+
+    import backend.api.actions as actions_mod
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "iterm-sess-zzz"
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+    fake_mgr = AsyncMock()
+    fake_mgr.send_text = AsyncMock(return_value=True)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+    fastapi_app.state.s.send_text_rate = {}
+
+    fake_now = [1000.0]
+
+    def fake_monotonic():
+        return fake_now[0]
+
+    monkeypatch.setattr(actions_mod.time, "monotonic", fake_monotonic)
+
+    # Fill the bucket.
+    for _ in range(5):
+        r = client.post(
+            f"/api/sessions/{sess.pid}/send-text",
+            json={"text": "hi", "submit": False},
+        )
+        assert r.status_code == 200, r.json()
+
+    # Still inside the window → blocked.
+    blocked = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "hi", "submit": False},
+    )
+    assert blocked.status_code == 429
+
+    # Jump past the window — bucket entries should be pruned and the next
+    # request must succeed.
+    fake_now[0] += 11.0
+    after = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "hi", "submit": False},
+    )
+    assert after.status_code == 200, after.json()
+
+
+def test_audit_log_includes_payload_preview(populated_app, caplog):
+    """#88: at INFO level, the audit log line for /send-text must include the
+    first 80 chars of the (sanitized) payload so we have forensic context.
+    """
+    import logging as _logging
+    from unittest.mock import AsyncMock
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "iterm-sess-zzz"
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+    fake_mgr = AsyncMock()
+    fake_mgr.send_text = AsyncMock(return_value=True)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+    fastapi_app.state.s.send_text_rate = {}
+
+    # Distinctive payload so we can grep for it; include a newline to verify
+    # the sanitizer strips control chars.
+    payload_text = "audit-test-payload-12345\nsecond-line"
+    expected_preview = "audit-test-payload-12345 second-line"
+
+    with caplog.at_level(_logging.INFO, logger="backend.api.actions"):
+        r = client.post(
+            f"/api/sessions/{sess.pid}/send-text",
+            json={"text": payload_text, "submit": False},
+        )
+    assert r.status_code == 200, r.json()
+    audit_lines = [rec.getMessage() for rec in caplog.records if rec.name == "backend.api.actions"]
+    assert any(expected_preview in line for line in audit_lines), audit_lines
 
 
 def test_send_text_400_when_no_iterm_session_id(populated_app):

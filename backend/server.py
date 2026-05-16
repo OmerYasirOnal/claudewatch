@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -114,6 +115,11 @@ class AppState:
     # to pass it explicitly; tests that instantiate AppState directly also
     # get a sensible value.
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Issue #88: per-PID token bucket for /send-text. The deque stores monotonic
+    # send timestamps in the current window; entries older than the window are
+    # pruned on each request. Lives on AppState so the bucket persists across
+    # requests but is reset between daemon restarts.
+    send_text_rate: dict[int, deque[float]] = field(default_factory=dict)
 
     async def broadcast(self, event: dict) -> None:
         for q in list(self.sse_queues):

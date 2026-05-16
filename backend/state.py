@@ -29,6 +29,22 @@ CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
 """
 
 
+def _to_utc_iso(dt: datetime) -> str:
+    """Render ``dt`` as an ISO 8601 string normalized to UTC.
+
+    Issue #91: ``hourly_history`` bins on ``substr(started_at, 1, 13)``, which
+    only lands in the right hour when the stored string is already UTC. A
+    naive ``datetime`` (no tzinfo) used to round-trip through ``isoformat()``
+    without any "+00:00" suffix and was implicitly treated as UTC by the
+    aggregation — but a caller who happened to pass a local-time-aware
+    datetime would shift the bin. Normalize every datetime we persist so the
+    SQLite column is uniformly UTC-suffixed.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    return dt.astimezone(timezone.utc).isoformat()
+
+
 class State:
     """SQLite-backed history of active + ended Claude sessions.
 
@@ -66,7 +82,7 @@ class State:
         """Insert or update the row for an active session keyed by ``(pid, started_at)``."""
         await self.connect()
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = _to_utc_iso(datetime.now(timezone.utc))
         total = session.usage.total_tokens if session.usage else 0
         cost = session.usage.cost_estimate_usd if session.usage else None
         summary = session.model_dump_json()
@@ -84,7 +100,7 @@ class State:
             """,
             (
                 session.pid,
-                session.started_at.isoformat(),
+                _to_utc_iso(session.started_at),
                 now,
                 session.cwd,
                 session.model,
@@ -99,10 +115,10 @@ class State:
         """Stamp ``ended_at`` for the row identified by ``(pid, started_at)``."""
         await self.connect()
         assert self._conn is not None
-        now = datetime.now(timezone.utc).isoformat()
+        now = _to_utc_iso(datetime.now(timezone.utc))
         await self._conn.execute(
             "UPDATE sessions SET ended_at=? WHERE pid=? AND started_at=? AND ended_at IS NULL",
-            (now, pid, started_at.isoformat()),
+            (now, pid, _to_utc_iso(started_at)),
         )
         await self._conn.commit()
 
