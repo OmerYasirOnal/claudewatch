@@ -60,15 +60,23 @@ class LinkerState:
     iterm_available: bool = True
 
 
-def _load_log_cached(state: LinkerState, path: Path) -> ParsedLog:
+async def _load_log_cached(state: LinkerState, path: Path) -> ParsedLog:
+    """Mtime-cached log parse — CPU work runs in a worker thread.
+
+    Issue #86: parse_log is CPU-bound and on adversarial input (huge user
+    prompts that hit the task-notification scan path) can take hundreds
+    of ms. Running it inline would block the asyncio scheduler loop and
+    delay every other detector tick; ``asyncio.to_thread`` moves the
+    parse off-loop so a slow file can't stall the whole pipeline.
+    """
     try:
         mtime = path.stat().st_mtime
     except OSError:
-        return parse_log(path)
+        return await asyncio.to_thread(parse_log, path)
     cached = state.log_cache.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
-    pl = parse_log(path)
+    pl = await asyncio.to_thread(parse_log, path)
     state.log_cache[path] = (mtime, pl)
     return pl
 
@@ -191,7 +199,7 @@ async def build_sessions(
             if chosen is None and logs:
                 chosen = logs[0]
             if chosen is not None:
-                parsed = _load_log_cached(state, chosen)
+                parsed = await _load_log_cached(state, chosen)
 
         last_activity_at = now
         if parsed and parsed.last_activity_at:

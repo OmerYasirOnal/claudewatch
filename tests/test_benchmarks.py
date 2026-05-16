@@ -102,6 +102,41 @@ def _mk_realistic_session(pid: int) -> ClaudeSession:
 # ---------------------------------------------------------------------------
 
 
+def test_parse_log_resists_regex_dos(tmp_path):
+    """Issue #86: a user prompt with thousands of unmatched <task-notification>
+    opens used to cause O(n^2) backtracking inside ``_TASK_NOTIF_BLOCK_RE``
+    because of the lazy ``.*?`` body. With the non-backtracking ``str.find``
+    scan and the length-cap the parser must finish near-instantly even on
+    adversarial input."""
+    f = tmp_path / "dos.jsonl"
+    # 5000 unmatched opens followed by a stray <task-id> — the regex used
+    # to walk back over every open looking for a matching close on each
+    # attempt.
+    nasty = "<task-notification>" * 5000 + "<task-id>x</task-id>"
+    f.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": "2026-05-17T10:00:00Z",
+                "cwd": "/Users/dev/proj",
+                "message": {
+                    "content": [{"type": "text", "text": nasty}],
+                },
+            }
+        )
+        + "\n"
+    )
+
+    start = time.perf_counter()
+    pl = parse_log(f)
+    elapsed = time.perf_counter() - start
+
+    # Parser ran (didn't crash). We don't care that nothing useful was
+    # extracted from the garbage input.
+    assert pl.message_count == 1
+    assert elapsed < 0.2, f"parse_log took {elapsed:.3f}s on regex-DoS input"
+
+
 def test_parse_log_handles_10k_entries_in_under_2s(tmp_path):
     """A 10k-line JSONL must parse in well under one scheduler tick.
 
