@@ -2,12 +2,14 @@ import SwiftUI
 
 struct SettingsView: View {
     @StateObject var vm = SettingsViewModel()
+    @EnvironmentObject var appVM: AppViewModel
+    @ObservedObject private var notifMgr = NotificationManager.shared
 
     var body: some View {
         TabView {
             GeneralTab(vm: vm)
                 .tabItem { Label("General", systemImage: "gearshape") }
-            NotificationsTab(vm: vm)
+            NotificationsTab(vm: vm, appVM: appVM, notifMgr: notifMgr)
                 .tabItem { Label("Notifications", systemImage: "bell") }
             EditorTab(vm: vm)
                 .tabItem { Label("Editor", systemImage: "doc.text") }
@@ -16,9 +18,10 @@ struct SettingsView: View {
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 480, height: 380)
+        .frame(width: 520, height: 440)
         .task {
             await vm.load()
+            await notifMgr.refreshAuthorizationStatus()
         }
         .overlay(alignment: .bottom) {
             if let err = vm.lastError {
@@ -100,30 +103,65 @@ private struct GeneralTab: View {
 
 private struct NotificationsTab: View {
     @ObservedObject var vm: SettingsViewModel
+    @ObservedObject var appVM: AppViewModel
+    @ObservedObject var notifMgr: NotificationManager
 
     var body: some View {
         Form {
+            Section("Notification source") {
+                Picker("Source", selection: $appVM.notificationSource) {
+                    Text("Backend (osascript, basic)").tag(NotificationSource.backend)
+                    Text("Native (this app, with Focus / Halt buttons)").tag(NotificationSource.native)
+                }
+                .pickerStyle(.radioGroup)
+
+                if appVM.notificationSource == .native {
+                    HStack(spacing: 6) {
+                        Image(systemName: notifMgr.authorized
+                              ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(notifMgr.authorized ? .green : .orange)
+                        Text(notifMgr.authorized
+                             ? "macOS notification permission granted"
+                             : "macOS hasn't authorized notifications yet")
+                            .font(.caption)
+                        Spacer()
+                        if !notifMgr.authorized {
+                            Button("Request") {
+                                Task { await notifMgr.requestAuthorization() }
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    Text("Switching to Native disables the backend's osascript notifications so you don't get duplicates. Switch back to Backend to re-enable them.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Backend mode uses `osascript display notification` for compatibility. No action buttons; the dashboard or menu bar is the only path to Focus/Halt.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Section("Master") {
                 Toggle("Enable macOS notifications", isOn: $vm.config.notifications.enabled)
+                if appVM.notificationSource == .native && vm.config.notifications.enabled {
+                    Text("Note: in Native mode the backend's master switch is held off by the tray. The triggers below still apply to the native notifications.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("Triggers") {
                 Toggle("When a Claude session ends", isOn: $vm.config.notifications.onSessionEnd)
-                    .disabled(!vm.config.notifications.enabled)
                 Toggle("When a session crosses the cost threshold", isOn: $vm.config.notifications.onHighCost)
-                    .disabled(!vm.config.notifications.enabled)
                 LabeledContent("Cost threshold") {
                     HStack {
                         TextField("", value: $vm.config.notifications.costThresholdUsd,
                                   format: .currency(code: "USD"))
                             .frame(width: 110)
                             .multilineTextAlignment(.trailing)
-                            .disabled(!vm.config.notifications.enabled || !vm.config.notifications.onHighCost)
+                            .disabled(!vm.config.notifications.onHighCost)
                     }
                 }
             }
-            Text("Notifications are delivered via osascript today. Native UNUserNotificationCenter with actionable Focus/Halt buttons is on the roadmap.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button("Save") { Task { await vm.save() } }
@@ -172,6 +210,18 @@ private struct RemoteControlTab: View {
             Section("Remote control") {
                 Toggle("Allow sending messages to live Claude sessions", isOn: $vm.config.remoteControl.enabled)
                 Text("When enabled, the dashboard chat panel forwards text to the corresponding iTerm session as if you typed it. Off by default. Off also blocks the POST /api/sessions/{pid}/send-text endpoint from accepting writes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Chat panel") {
+                HStack(spacing: 6) {
+                    Image(systemName: "bubble.left.and.bubble.right.fill")
+                        .foregroundStyle(.tint)
+                    Text("Click the chat icon on any session row to open a native chat window. The composer is read-only when remote control is disabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Cmd+Return sends · Return inserts a newline (so multi-line prompts don't fire by accident).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

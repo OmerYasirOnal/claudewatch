@@ -43,8 +43,11 @@ struct ClaudeWatchTrayApp: App {
 
         // Native Settings window — opens via Cmd+, or the gear button in the
         // popover footer. Each tab binds to /api/config and saves on change.
+        // The Notifications tab also needs the AppViewModel for the
+        // notification-source picker, so inject it as an environment object.
         Settings {
             SettingsView()
+                .environmentObject(vm)
         }
     }
 }
