@@ -14,13 +14,35 @@ function appRoot() {
     newSession: { cwd: "", window_type: "new-window", skipPerm: true, customFlags: "" },
     newSessionError: "",
     _sse: null,
+    cardVisibility: {
+      active: true,
+      sessions_today: true,
+      active_tokens: true,
+      active_cost: true,
+      cost_today: true,
+    },
 
     async init() {
+      try {
+        const raw = localStorage.getItem("claudewatch.cardVisibility");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === "object") {
+            this.cardVisibility = { ...this.cardVisibility, ...parsed };
+          }
+        }
+      } catch (e) { /* ignore malformed storage */ }
       await Promise.all([this.loadHealth(), this.loadSessions(), this.loadStats(), this.loadConfig()]);
       this.connectSSE();
       this._startNowTimer();
       setInterval(() => this.loadStats(), 5000);
       setInterval(() => this.loadHealth(), 30000);
+    },
+
+    saveCardVisibility() {
+      try {
+        localStorage.setItem("claudewatch.cardVisibility", JSON.stringify(this.cardVisibility));
+      } catch (e) { console.warn("save cardVisibility failed", e); }
     },
 
     async loadHealth() {
