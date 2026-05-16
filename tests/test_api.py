@@ -327,6 +327,107 @@ def test_new_session_rejects_unsafe_flag(populated_app):
     assert r.status_code == 400
 
 
+def test_new_session_rejects_path_prefix_bypass(populated_app, tmp_path, monkeypatch):
+    """#38: a command path like ~/.local/binEVIL/x must NOT pass the
+    ~/.local/bin allowlist via str.startswith."""
+    client, _, _ = populated_app
+    fake_home = tmp_path / "home"
+    # Sibling of the allowed ~/.local/bin: would pass startswith() but is not
+    # actually a parent in path terms.
+    evil_dir = fake_home / ".local" / "binEVIL"
+    evil_dir.mkdir(parents=True)
+    evil_cmd = evil_dir / "x"
+    evil_cmd.write_text("#!/bin/sh\n")
+    evil_cmd.chmod(0o755)
+    monkeypatch.setattr("backend.api.actions.Path.home", lambda: fake_home)
+
+    r = client.post(
+        "/api/sessions/new",
+        json={"cwd": str(fake_home), "command": str(evil_cmd)},
+    )
+    assert r.status_code == 400
+    assert "under" in r.json()["detail"].lower()
+
+
+def test_new_session_accepts_legitimate_local_bin(populated_app, tmp_path, monkeypatch):
+    """#38: a real command living under ~/.local/bin must be accepted.
+
+    We point Path.home() at a tmp dir so the test is hermetic — otherwise
+    ~/.local/bin/claude on the dev machine is a symlink that resolves elsewhere.
+    """
+    import subprocess as _sub
+
+    client, _, _ = populated_app
+    fake_home = tmp_path / "home"
+    bin_dir = fake_home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    cmd = bin_dir / "claude"
+    cmd.write_text("#!/bin/sh\n")
+    cmd.chmod(0o755)
+
+    monkeypatch.setattr("backend.api.actions.Path.home", lambda: fake_home)
+
+    def fake_run(*args, **kwargs):
+        return _sub.CompletedProcess(args[0] if args else [], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("backend.api.actions.subprocess.run", fake_run)
+
+    r = client.post(
+        "/api/sessions/new",
+        json={"cwd": str(fake_home), "command": str(cmd)},
+    )
+    assert r.status_code == 200, r.json()
+
+
+def test_new_session_accepts_effort_flag(populated_app, monkeypatch):
+    """#55: --effort is a value-taking flag in the canonical set; using it as
+    `--effort high` must no longer 400 due to the missing flag value rule."""
+    import subprocess as _sub
+
+    client, _, _ = populated_app
+
+    def fake_run(*args, **kwargs):
+        return _sub.CompletedProcess(args[0] if args else [], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("backend.api.actions.subprocess.run", fake_run)
+    r = client.post(
+        "/api/sessions/new",
+        json={"cwd": str(Path.home()), "flags": ["--effort", "high"]},
+    )
+    assert r.status_code == 200, r.json()
+
+
+def test_halt_409_on_pid_reuse(populated_app, monkeypatch):
+    """#33: when the registered PID no longer refers to a Claude process,
+    /halt must 409 instead of SIGINT'ing the unrelated process."""
+    client, fastapi_app, sess = populated_app
+
+    # Pretend the PID is alive (psutil.Process won't raise) but is_claude_process
+    # returns False.
+    class _FakeProc:
+        def __init__(self, pid):
+            self.pid = pid
+
+    monkeypatch.setattr("backend.api.actions.psutil.Process", _FakeProc)
+    monkeypatch.setattr("backend.api.actions.is_claude_process", lambda proc, user: False)
+
+    def fail_kill(*a, **k):
+        raise AssertionError("os.kill must not be called when PID is not a claude process")
+
+    monkeypatch.setattr("backend.api.actions.os.kill", fail_kill)
+
+    r = client.post(f"/api/sessions/{sess.pid}/halt")
+    assert r.status_code == 409
+    assert "claude" in r.json()["detail"].lower()
+
+
+def test_log_tail_caps_limit(populated_app):
+    """#47: the ?limit query must be capped by FastAPI's Query(le=500)."""
+    client, _, sess = populated_app
+    r = client.get(f"/api/sessions/{sess.pid}/log-tail?limit=99999999")
+    assert r.status_code == 422
+
+
 def test_log_tail_privacy_redacts_text_by_default(populated_app, tmp_path):
     client, fastapi_app, sess = populated_app
     fastapi_app.state.s.config["show_log_text"] = False

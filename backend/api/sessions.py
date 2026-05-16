@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter(prefix="/api")
+
+# #47: cap the amount of log we'll parse on every request so a multi-GB JSONL
+# can't OOM the server. We read at most the trailing slice of this size.
+MAX_LOG_TAIL_BYTES = 5 * 1024 * 1024
 
 
 def _state(request: Request):
@@ -41,7 +46,11 @@ async def get_files(pid: int, request: Request, minutes: int = 10):
 
 
 @router.get("/sessions/{pid}/log-tail")
-async def get_log_tail(pid: int, request: Request, limit: int = 20):
+async def get_log_tail(
+    pid: int,
+    request: Request,
+    limit: int = Query(20, ge=1, le=500),
+):
     s = _state(request)
     sess = s.sessions.get(pid)
     if not sess:
@@ -52,17 +61,28 @@ async def get_log_tail(pid: int, request: Request, limit: int = 20):
     path = Path(sess.conversation_log_path)
     if not path.is_file():
         return {"entries": [], "log_path": str(path)}
-    entries: list[dict] = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
+
+    def _read_tail() -> list[dict] | None:
+        entries: list[dict] = []
+        try:
+            size = path.stat().st_size
+            with open(path, "rb") as f:
+                if size > MAX_LOG_TAIL_BYTES:
+                    f.seek(-MAX_LOG_TAIL_BYTES, 2)
+                    f.readline()  # discard partial line
+                raw = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        for line in raw.splitlines():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return entries[-limit:]
+
+    entries = await asyncio.to_thread(_read_tail)
+    if entries is None:
         return {"entries": [], "log_path": str(path)}
-    entries = entries[-limit:]
 
     if not show_text:
         for e in entries:
