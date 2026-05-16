@@ -86,6 +86,51 @@ final class PythonRunnerTests: XCTestCase {
         }
     }
 
+    // MARK: - orphan PID-file handling (audit #94)
+
+    /// pidFileURL must live under ~/Library/Caches/<bundle-id>/ so it's
+    /// auto-cleaned by macOS and doesn't pollute Application Support.
+    func test_pidFileURL_path_under_caches() {
+        let runner = PythonRunner(port: 0)
+        guard let url = runner.pidFileURL else {
+            XCTFail("pidFileURL was nil")
+            return
+        }
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        XCTAssertTrue(url.path.hasPrefix(caches.path),
+                      "pid file (\(url.path)) should be under Caches (\(caches.path))")
+        XCTAssertEqual(url.lastPathComponent, "python.pid")
+        XCTAssertTrue(url.path.contains("com.omeryasironal.claudewatch.tray"),
+                      "pid file should be namespaced under the tray bundle id")
+    }
+
+    /// A PID file pointing at a process that doesn't exist must be cleaned
+    /// up by reapOrphanIfAny() — otherwise we'd keep trying to SIGTERM a
+    /// dead/recycled PID on every launch.
+    func test_reapOrphanIfAny_removes_stale_pid_file() async throws {
+        let runner = PythonRunner(port: 0)
+        guard let url = runner.pidFileURL else {
+            XCTFail("pidFileURL was nil")
+            return
+        }
+        // PID 99999 is well above the default kernel max on macOS and is
+        // overwhelmingly unlikely to be alive on a test host. If it does
+        // happen to be alive, skip rather than risk SIGTERM-ing something
+        // unrelated.
+        let stalePid: Int32 = 99999
+        if kill(stalePid, 0) == 0 {
+            throw XCTSkip("PID \(stalePid) happens to be alive on this host; can't safely run this test.")
+        }
+        let iso = ISO8601DateFormatter().string(from: Date())
+        try "\(stalePid) \(iso)\n".write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+
+        await runner.reapOrphanIfAny()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path),
+                       "stale PID file should be removed after reapOrphanIfAny()")
+    }
+
     /// Mirrors PythonRunner.locatePython()'s search list — best-effort.
     private static func bundledPythonExists() -> Bool {
         let candidates = [
