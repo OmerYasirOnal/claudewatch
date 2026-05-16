@@ -7,7 +7,7 @@ overriding state setup.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -42,7 +42,7 @@ def app(tmp_path, monkeypatch):
 @pytest.fixture
 def populated_app(app, tmp_path):
     client, fastapi_app = app
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sess = ClaudeSession(
         pid=12345,
         cwd="/Users/me/Projects/x",

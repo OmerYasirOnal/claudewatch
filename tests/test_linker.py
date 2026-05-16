@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,7 +26,7 @@ def _proc(pid: int, cwd: str, model: str | None = None, session_id: str | None =
         pid=pid,
         ppid=1,
         cwd=cwd,
-        started_at=datetime(2026, 5, 12, 10, 0, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 12, 10, 0, 0, tzinfo=UTC),
         cpu_percent=0.0,
         memory_mb=200.0,
         cmdline=cmdline,
