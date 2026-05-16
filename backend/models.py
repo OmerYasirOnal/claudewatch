@@ -45,6 +45,18 @@ class GitContext(BaseModel):
 
 SessionStatus = Literal["working", "waiting", "idle"]
 LocationType = Literal["iterm", "tmux", "headless"]
+SubagentStatus = Literal["pending", "completed"]
+
+
+class SubagentRun(BaseModel):
+    tool_use_id: str
+    description: str = ""
+    subagent_type: str = "general-purpose"
+    started_at: datetime
+    ended_at: datetime | None = None
+    duration_seconds: int | None = None
+    status: SubagentStatus = "pending"
+    result_preview: str | None = None  # first 200 chars of tool_result text
 
 
 class ClaudeSession(BaseModel):
@@ -102,6 +114,8 @@ class ClaudeSession(BaseModel):
     current_task_id: str | None = None
     current_task_started_at: datetime | None = None
     current_task_elapsed_seconds: int | None = None
+
+    subagents: list[SubagentRun] = Field(default_factory=list)
 
 
 class NewSessionRequest(BaseModel):
