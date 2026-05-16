@@ -189,6 +189,22 @@ struct MenuBarContent: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
 
+            // Restart the bundled child only — never touches an external
+            // daemon (audit #94). Disabled while we're mid-startup so we
+            // don't race with a launch already in flight.
+            Button {
+                Task {
+                    runner.stop()
+                    await runner.startIfNeeded()
+                }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .help("Restart bundled backend")
+            .disabled(runner.state == .external || runner.state == .checking)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
             Button(role: .destructive) {
                 vm.quit()
             } label: {

@@ -40,6 +40,12 @@ final class PythonRunner: ObservableObject {
     func startIfNeeded() async {
         guard case .idle = state else { return }
         state = .checking
+        // If we previously SIGKILL'd ourselves (or hard-crashed before
+        // terminationHandler fired), the bundled child can still be alive
+        // and owning :7788. Reap it before we probe the port, otherwise
+        // isBackendUp() returns true and we slip into .external — silently
+        // observing a process the user can't manage.
+        await reapOrphanIfAny()
         if await isBackendUp() {
             logger.info("Backend already responsive on :\(self.port); will observe externally")
             state = .external
@@ -75,6 +81,7 @@ final class PythonRunner: ObservableObject {
     func stop() {
         guard let proc = process, proc.isRunning else {
             process = nil
+            removePidFile()
             state = .idle
             return
         }
@@ -88,6 +95,7 @@ final class PythonRunner: ObservableObject {
             kill(proc.processIdentifier, SIGKILL)
         }
         process = nil
+        removePidFile()
         state = .idle
     }
 
@@ -142,6 +150,7 @@ final class PythonRunner: ObservableObject {
 
         try proc.run()
         self.process = proc
+        writePidFile(pid: proc.processIdentifier)
         state = .launching
 
         // Set up a termination handler so we surface unexpected exits.
@@ -152,8 +161,88 @@ final class PythonRunner: ObservableObject {
                     self.state = .failed("Backend exited unexpectedly (code \(p.terminationStatus))")
                 }
                 self.process = nil
+                self.removePidFile()
             }
         }
+    }
+
+    // MARK: - orphan reaping
+
+    /// On-disk record of the child PID we last spawned. Lives under
+    /// ~/Library/Caches so it's auto-pruned by the OS and survives across
+    /// app launches without polluting Application Support.
+    var pidFileURL: URL? {
+        let fm = FileManager.default
+        guard let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let dir = caches.appendingPathComponent("com.omeryasironal.claudewatch.tray", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir.appendingPathComponent("python.pid")
+    }
+
+    private func writePidFile(pid: Int32) {
+        guard let url = pidFileURL else { return }
+        let iso = ISO8601DateFormatter().string(from: Date())
+        let payload = "\(pid) \(iso)\n"
+        do {
+            try payload.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            logger.error("Failed to write PID file at \(url.path): \(error.localizedDescription)")
+        }
+    }
+
+    private func removePidFile() {
+        guard let url = pidFileURL else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Read the PID file if it exists. Returns the recorded PID iff the
+    /// process is still alive. If the PID is dead/recycled the stale file
+    /// is unlinked as a side effect. Start-time matching is intentionally
+    /// skipped in V1 — pragmatic, with an age cap to avoid PID reuse traps.
+    func readOrphanPidFile() -> Int32? {
+        guard let url = pidFileURL else { return nil }
+        guard let data = try? Data(contentsOf: url),
+              let str = String(data: data, encoding: .utf8) else { return nil }
+        let parts = str.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: " ", maxSplits: 1)
+        guard let pid = Int32(parts.first ?? "") else { return nil }
+        // Age cap: don't reclaim a PID we wrote more than 7 days ago — the
+        // chance the OS has recycled it onto an unrelated process is too high.
+        if parts.count == 2 {
+            let iso = ISO8601DateFormatter()
+            if let written = iso.date(from: String(parts[1])),
+               Date().timeIntervalSince(written) > 7 * 24 * 60 * 60 {
+                try? FileManager.default.removeItem(at: url)
+                return nil
+            }
+        }
+        // ESRCH = no such process. Treat as a stale file.
+        if kill(pid, 0) == -1 && errno == ESRCH {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+        return pid
+    }
+
+    /// SIGTERM any leftover bundled-python child from a previous launch and
+    /// wait briefly for it to exit. Called from startIfNeeded() before the
+    /// port probe so the orphan doesn't masquerade as an "external" daemon.
+    func reapOrphanIfAny() async {
+        guard let pid = readOrphanPidFile() else { return }
+        logger.warning("Found orphaned bundled-python PID \(pid); SIGTERM-ing it")
+        _ = kill(pid, SIGTERM)
+        // Poll for death; ESRCH means the kernel reaped it.
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if kill(pid, 0) == -1 && errno == ESRCH { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        // Whether or not it died, drop the file — we no longer own this PID.
+        removePidFile()
     }
 
     /// Find the bundled Python interpreter. Two layouts supported:
