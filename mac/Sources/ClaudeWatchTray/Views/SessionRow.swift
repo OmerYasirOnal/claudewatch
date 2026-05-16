@@ -4,6 +4,7 @@ struct SessionRow: View {
     let sess: Session
     let onFocus: () -> Void
     let onHalt: () -> Void
+    let onChat: () -> Void
 
     private var statusColor: Color {
         if sess.isInFlight { return .green }
@@ -80,6 +81,13 @@ struct SessionRow: View {
                 Button(role: .destructive, action: onHalt) { Text("Halt") }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                Button(action: onChat) {
+                    Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Open chat for this session")
                 Spacer()
             }
         }

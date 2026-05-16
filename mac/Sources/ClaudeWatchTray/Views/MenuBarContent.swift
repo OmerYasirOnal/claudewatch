@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarContent: View {
     @ObservedObject var vm: AppViewModel
     @ObservedObject var runner: PythonRunner
+    @ObservedObject private var notifMgr = NotificationManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -50,10 +51,43 @@ struct MenuBarContent: View {
                 .lineLimit(2)
                 .foregroundStyle(.secondary)
             Spacer()
+            // Surface the active notification source so the user always knows
+            // who's responsible for the next banner that pops.
+            notificationSourceBadge
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
         .background(color.opacity(0.06))
+    }
+
+    /// Tiny badge on the right of the backend status row indicating whether
+    /// notifications are coming from the tray (native) or backend (osascript).
+    /// Tinted bell + "Native" pill when native, hollow bell otherwise. Hidden
+    /// entirely when notifications are paused so the user notices the silence.
+    @ViewBuilder
+    private var notificationSourceBadge: some View {
+        if let _ = notifMgr.pausedUntil {
+            Label("Paused", systemImage: "bell.slash.fill")
+                .labelStyle(.iconOnly)
+                .foregroundStyle(.orange)
+                .help("Notifications paused — click Resume in the footer")
+        } else if vm.notificationSource == .native {
+            HStack(spacing: 3) {
+                Image(systemName: "bell.badge.fill")
+                Text("Native")
+            }
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+            .foregroundStyle(.tint)
+            .help("Tray-side actionable notifications are active")
+        } else {
+            Image(systemName: "bell")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .help("Backend (osascript) notifications")
+        }
     }
 
     private var header: some View {
@@ -90,7 +124,8 @@ struct MenuBarContent: View {
                         SessionRow(
                             sess: sess,
                             onFocus: { vm.focus(sess.pid) },
-                            onHalt: { vm.halt(sess.pid) }
+                            onHalt: { vm.halt(sess.pid) },
+                            onChat: { vm.openChat(for: sess) }
                         )
                         Divider()
                     }
@@ -168,8 +203,8 @@ struct MenuBarContent: View {
     }
 
     /// Secondary footer with low-noise affordances (re-open the welcome flow,
-    /// etc.). Kept separate from the main action bar so quit/refresh/settings
-    /// stay visually prominent.
+    /// pause notifications, etc.). Kept separate from the main action bar so
+    /// quit/refresh/settings stay visually prominent.
     private var metaFooter: some View {
         HStack(spacing: 8) {
             Button {
@@ -184,8 +219,54 @@ struct MenuBarContent: View {
             .help("Re-run the first-launch welcome flow")
 
             Spacer()
+
+            pauseMenu
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    /// Quick-action menu for pausing notifications. Always present so the user
+    /// can mute even when the backend is the source — the pause flag lives on
+    /// NotificationManager which gates `handleSessionUpdated/Ended`. Backend
+    /// osascripts aren't affected by this flag; toggling the master switch in
+    /// Settings does that. We document the distinction in the menu copy.
+    @ViewBuilder
+    private var pauseMenu: some View {
+        if let until = notifMgr.pausedUntil {
+            Button {
+                notifMgr.resume()
+            } label: {
+                Label(pauseLabel(until: until), systemImage: "bell.slash.fill")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.orange)
+            .help("Resume native notifications")
+        } else {
+            Menu {
+                Button("Pause for 1 hour") {
+                    notifMgr.pause(for: 60 * 60)
+                }
+                Button("Pause until next launch") {
+                    notifMgr.pauseUntilNextLaunch()
+                }
+            } label: {
+                Label("Pause notifications", systemImage: "bell.slash")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .foregroundStyle(.secondary)
+            .help("Mute tray-side notifications temporarily")
+        }
+    }
+
+    private func pauseLabel(until: Date) -> String {
+        if until == .distantFuture { return "Paused until next launch" }
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return "Paused \(f.localizedString(for: until, relativeTo: Date()))"
     }
 }

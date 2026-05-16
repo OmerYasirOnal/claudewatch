@@ -22,7 +22,7 @@ actor APIClient {
     private let decoder: JSONDecoder
     private let session: URLSession
 
-    init(port: Int = APIClient.defaultPort) {
+    init(port: Int = APIClient.defaultPort, session: URLSession? = nil) {
         self.base = URL(string: "http://127.0.0.1:\(port)")!
         let d = JSONDecoder()
         // Backend emits ISO8601 with fractional seconds + 'Z' suffix.
@@ -41,13 +41,17 @@ actor APIClient {
         }
         self.decoder = d
 
-        let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 5
-        cfg.timeoutIntervalForResource = 5
-        // Don't write cookies, don't keep credentials.
-        cfg.httpCookieAcceptPolicy = .never
-        cfg.httpShouldSetCookies = false
-        self.session = URLSession(configuration: cfg)
+        if let session {
+            self.session = session
+        } else {
+            let cfg = URLSessionConfiguration.default
+            cfg.timeoutIntervalForRequest = 5
+            cfg.timeoutIntervalForResource = 5
+            // Don't write cookies, don't keep credentials.
+            cfg.httpCookieAcceptPolicy = .never
+            cfg.httpShouldSetCookies = false
+            self.session = URLSession(configuration: cfg)
+        }
     }
 
     func listSessions() async throws -> [Session] {
@@ -68,6 +72,23 @@ actor APIClient {
 
     func getConfig() async throws -> AppConfig {
         return try await get("/api/config")
+    }
+
+    /// POST text into a live Claude session's iTerm pane. Backend rejects with
+    /// 403 unless `remote_control.enabled = true` in config.
+    func sendText(pid: Int, text: String, submit: Bool = true) async throws {
+        let payload: [String: Any] = ["text": text, "submit": submit]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var req = URLRequest(url: base.appendingPathComponent("/api/sessions/\(pid)/send-text"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        do {
+            let (_, response) = try await session.data(for: req)
+            guard let http = response as? HTTPURLResponse else { throw APIError.http(-1) }
+            guard (200..<300).contains(http.statusCode) else { throw APIError.http(http.statusCode) }
+        } catch let e as APIError { throw e }
+        catch { throw APIError.transport(error) }
     }
 
     /// POST a JSON dictionary payload to /api/config. Caller must hand-build the dict
