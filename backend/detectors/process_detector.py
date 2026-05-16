@@ -30,7 +30,6 @@ VALUE_TAKING_FLAGS = {
     "--mcp-config",
     "--settings",
     "--add-dir",
-    "--continue",
     "--resume",
     "--session-id",
     "--agent",
