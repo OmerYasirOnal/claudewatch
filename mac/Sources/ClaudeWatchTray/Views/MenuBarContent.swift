@@ -12,6 +12,8 @@ struct MenuBarContent: View {
             sessionList
             Divider()
             footer
+            Divider()
+            metaFooter
         }
         .frame(width: 380)
         .task {
@@ -163,5 +165,27 @@ struct MenuBarContent: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// Secondary footer with low-noise affordances (re-open the welcome flow,
+    /// etc.). Kept separate from the main action bar so quit/refresh/settings
+    /// stay visually prominent.
+    private var metaFooter: some View {
+        HStack(spacing: 8) {
+            Button {
+                WelcomeController.shared.reset()
+                WelcomeController.shared.show()
+            } label: {
+                Label("Show welcome again", systemImage: "sparkles")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Re-run the first-launch welcome flow")
+
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 }

@@ -1,4 +1,4 @@
-.PHONY: all build app run install clean test python backend tray frontend dmg
+.PHONY: all build app run install clean test python backend tray frontend dmg icon
 .DEFAULT_GOAL := app
 
 APP_NAME     := ClaudeWatch
@@ -8,6 +8,7 @@ BIN_PATH     := .build/release/ClaudeWatchTray
 BUILD_DIR    := build
 PY_DIR       := $(BUILD_DIR)/python
 REPO_ROOT    := $(realpath ..)
+ICON_ICNS    := Resources/AppIcon.icns
 
 # ───────────────────────────────── top-level targets ──────────────────────────
 
@@ -25,12 +26,24 @@ python:
 backend: python
 	./scripts/bundle-backend.sh
 
+## icon — regenerate Resources/AppIcon.icns from the SwiftUI source.
+## The .icns is committed to the repo; this target is only needed when the
+## icon design changes.
+icon:
+	./scripts/make-icon.sh
+
 ## app — full pipeline: tray + python + backend + assemble .app bundle.
 app: tray python backend
 	@echo "→ Assembling $(BUNDLE)"
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(RESOURCES)
 	cp $(BIN_PATH) $(BUNDLE)/Contents/MacOS/$(APP_NAME)
 	cp Info.plist $(BUNDLE)/Contents/Info.plist
+	@# Copy the pre-built AppIcon.icns (regenerate with `make icon`).
+	@if [ -f $(ICON_ICNS) ]; then \
+		cp $(ICON_ICNS) $(RESOURCES)/AppIcon.icns; \
+	else \
+		echo "  ⚠ $(ICON_ICNS) missing — run 'make icon' to generate"; \
+	fi
 	@# Copy the bundled Python interpreter + site-packages
 	rm -rf $(RESOURCES)/python
 	cp -R $(PY_DIR) $(RESOURCES)/python
