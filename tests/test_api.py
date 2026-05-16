@@ -32,7 +32,10 @@ def app(tmp_path, monkeypatch):
 
     app = create_app()
 
-    with TestClient(app) as client:
+    # TrustedHostMiddleware (issue #39) rejects the default TestClient host
+    # "testserver"; pin the base_url to 127.0.0.1 so requests carry an allowed
+    # Host header.
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         yield client, app
 
 

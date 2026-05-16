@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.api import actions, config_api, health, history, sessions, stream
 from backend.config import STATE_DB, load_config
@@ -31,6 +32,22 @@ from backend.state import State
 
 log = logging.getLogger("claudewatch")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+def _safe_float(value: Any, default: float, min_val: float = 0.1) -> float:
+    """Coerce ``value`` to float, falling back to ``default`` on bad input.
+
+    Used to defend the scheduler loops against malformed config values; bad
+    input logs a warning and returns ``default`` instead of raising (which
+    would otherwise kill the long-running task — see issue #28).
+    """
+    try:
+        f = float(value)
+        return f if f >= min_val else default
+    except (TypeError, ValueError):
+        log.warning("Invalid config value %r, falling back to %s", value, default)
+        return default
+
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -62,20 +79,44 @@ class AppState:
     # when the dump actually changes.
     session_hashes: dict[int, str] = field(default_factory=dict)
     last_prune_at: float = 0.0
+    # Set on lifespan shutdown so SSE generators (and any other long-lived
+    # awaiters) can wake immediately instead of waiting for their next timeout.
+    # See issue #27.
+    shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def broadcast(self, event: dict) -> None:
-        dead = []
         for q in list(self.sse_queues):
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                dead.append(q)
-        for d in dead:
-            self.sse_queues.discard(d)
+                # Issue #43: a slow client used to get its queue silently
+                # discarded, freezing the dashboard. Instead, drain the queue
+                # and push a reconnect hint so the client can re-establish.
+                while True:
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                try:
+                    q.put_nowait({"event": "reconnect-required"})
+                except asyncio.QueueFull:
+                    pass
+
+
+# Fields that change on every tick (or are derived) and would otherwise defeat
+# the session-diff hash, causing session.updated to fire constantly even when
+# nothing meaningful changed (issue #45).
+_DIFF_EXCLUDE = {
+    "duration_seconds",
+    "cpu_percent",
+    "memory_mb",
+    "last_activity_at",
+    "current_task_elapsed_seconds",
+}
 
 
 def _session_hash(sess: ClaudeSession) -> str:
-    return hashlib.sha256(sess.model_dump_json().encode()).hexdigest()
+    return hashlib.sha256(sess.model_dump_json(exclude=_DIFF_EXCLUDE).encode()).hexdigest()
 
 
 async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
@@ -129,7 +170,7 @@ async def _maybe_prune(s: AppState) -> None:
 
 
 async def _scheduler_loop(s: AppState) -> None:
-    interval = float(s.config.get("process_scan_interval_seconds", 2))
+    interval = _safe_float(s.config.get("process_scan_interval_seconds", 2), default=2.0)
     while True:
         try:
             new_sessions = await build_sessions(
@@ -161,7 +202,7 @@ async def _iterm_refresh_loop(s: AppState) -> None:
     and only fall back to AppleScript when we have unlinked claude PIDs AND
     enough time has passed since the last fallback.
     """
-    interval = float(s.config.get("iterm_refresh_interval_seconds", 5))
+    interval = _safe_float(s.config.get("iterm_refresh_interval_seconds", 5), default=5.0)
     while True:
         try:
             await _iterm_refresh_once(s)
@@ -215,6 +256,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Wake any SSE generators (or other awaiters) blocked on the queue so
+        # they can exit cleanly before we tear down the scheduler. See #27.
+        s.shutdown_event.set()
         for t in (scheduler_task, iterm_task):
             t.cancel()
         for t in (scheduler_task, iterm_task):
@@ -230,6 +274,10 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="ClaudeWatch", version="0.2.0", lifespan=lifespan)
+    # Issue #39: defeat DNS-rebinding attacks by rejecting requests whose
+    # Host header is anything other than a loopback address. The daemon
+    # only ever binds to 127.0.0.1, so this is purely defence-in-depth.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
     app.include_router(sessions.router)
     app.include_router(actions.router)
     app.include_router(stream.router)

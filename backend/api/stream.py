@@ -22,13 +22,35 @@ async def stream(request: Request):
                 "snapshot",
                 {"sessions": [sess.model_dump(mode="json") for sess in s.sessions.values()]},
             )
+            keepalive_interval = 15.0
             while True:
                 if await request.is_disconnected():
                     break
+                # Issue #27: race the queue against the app's shutdown_event
+                # so daemon stop wakes us immediately instead of waiting up to
+                # 15s for the next keepalive timeout.
+                get_task = asyncio.create_task(queue.get())
+                shutdown_task = asyncio.create_task(s.shutdown_event.wait())
                 try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    done, pending = await asyncio.wait(
+                        {get_task, shutdown_task},
+                        timeout=keepalive_interval,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for t in (get_task, shutdown_task):
+                        if not t.done():
+                            t.cancel()
+                if shutdown_task in done:
+                    # Server is shutting down — exit the generator so the
+                    # response can finish before the worker dies.
+                    break
+                if get_task in done:
+                    msg = get_task.result()
                     yield _sse_event(msg.get("event", "message"), msg)
-                except TimeoutError:
+                else:
+                    # Timed out without either event firing — emit a keepalive
+                    # so proxies / curl pipes don't drop the connection.
                     yield ":keepalive\n\n"
         finally:
             s.sse_queues.discard(queue)
