@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-import tomllib
+import sys
 from pathlib import Path
 from typing import Any
 
 import tomli_w
+
+# tomllib is stdlib on Python 3.11+; fall back to the `tomli` package on 3.10.
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover — exercised in CI's 3.10 matrix
+    import tomli as tomllib
 
 CONFIG_DIR = Path.home() / ".claudewatch"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
