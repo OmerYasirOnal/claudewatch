@@ -10,6 +10,8 @@
     <string>ClaudeWatch</string>
     <key>CFBundleExecutable</key>
     <string>ClaudeWatch</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>0.3.0</string>
     <key>CFBundleVersion</key>

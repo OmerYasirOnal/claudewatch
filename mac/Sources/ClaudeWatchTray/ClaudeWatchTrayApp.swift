@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -17,6 +18,13 @@ struct ClaudeWatchTrayApp: App {
             // Note: runner is a separate @StateObject so we can't capture it
             // by reference cleanly; instead we send a posix signal to any
             // child of ours. The runner's deinit also handles cleanup.
+        }
+
+        // First-launch welcome flow. We have to defer to the next run-loop
+        // tick because NSApp isn't fully wired up while a SwiftUI App's
+        // `init` is running and `setActivationPolicy` would no-op.
+        DispatchQueue.main.async {
+            WelcomeController.shared.showIfFirstLaunch()
         }
     }
 

@@ -53,9 +53,29 @@ Targets:
 1. Download `ClaudeWatch.dmg` from
    [Releases](https://github.com/OmerYasirOnal/claudewatch/releases)
 2. Double-click to mount → drag `ClaudeWatch.app` into `Applications`
-3. First launch: macOS will ask for **Automation** permission (for iTerm) and
-   **Notifications** permission. Allow both.
+3. First launch: a **welcome window** walks you through Automation (iTerm
+   AppleScript control) and Notifications permission grants, then drops you
+   back to the menu bar with the dashboard one click away.
 4. The 🐜 icon appears in your menu bar. Click it for the popover.
+
+> To re-run the welcome flow at any time, click **Show welcome again** at the
+> bottom of the popover. To force a fresh first-launch (e.g. for testing):
+> `defaults delete com.omeryasironal.claudewatch.tray claudewatch.tray.welcomeShown`.
+
+## App icon
+
+`mac/Resources/AppIcon.icns` is committed to the repo so end users get the
+emerald→cyan ant icon out of the box. To regenerate (after tweaking colors or
+swapping the glyph):
+
+```bash
+make icon          # → mac/Resources/AppIcon.icns
+```
+
+That target runs `scripts/render-icon.swift` (a pure AppKit renderer) to
+produce a 1024×1024 source PNG, then `scripts/make-icon.sh` resizes via
+`sips` into a complete `iconset` and runs `iconutil` to package the `.icns`.
+The `app` target picks up `Resources/AppIcon.icns` automatically.
 
 ### Auto-start at login
 
