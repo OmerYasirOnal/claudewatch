@@ -30,8 +30,10 @@ _CACHE_TTL_SECONDS = 30.0
 
 @dataclass
 class ItermSessionInfo:
-    window_id: int
-    tab_id: int
+    # iTerm 3.5+ returns UUID-like strings for window/tab IDs (e.g.
+    # "pty-518AFBF3-77FC-...") — never coerce to int (#22).
+    window_id: str
+    tab_id: str
     session_id: str
     tab_title: str
     job_pid: int | None
@@ -39,8 +41,8 @@ class ItermSessionInfo:
 
 @dataclass
 class ItermLocation:
-    window_id: int
-    tab_id: int
+    window_id: str
+    tab_id: str
     session_id: str
     tab_title: str
 
@@ -102,16 +104,13 @@ class ItermConnectionManager:
         if app is None:
             return out
         for window in app.windows:
-            try:
-                window_id = int(window.window_id) if str(window.window_id).isdigit() else 0
-            except Exception:
-                window_id = 0
+            # Keep IDs as raw strings — iTerm 3.5+ uses UUID-like values like
+            # "pty-518AFBF3-77FC-464B-9DB6-5513BC6F53C3" for windows; coercing
+            # to int silently zeroed every window_id and killed the Python-API
+            # focus path (#22).
+            window_id = str(window.window_id)
             for tab in window.tabs:
-                try:
-                    tab_id_raw = tab.tab_id
-                    tab_id = int(tab_id_raw) if str(tab_id_raw).isdigit() else 0
-                except Exception:
-                    tab_id = 0
+                tab_id = str(tab.tab_id)
                 tab_title = ""
                 try:
                     tab_title = await tab.async_get_variable("title") or ""
@@ -137,14 +136,51 @@ class ItermConnectionManager:
         return out
 
     async def _drop_connection(self) -> None:
-        conn = self._conn
+        # #23: iterm2.Connection has no `async_close` in iterm2 >= 2.10. Just
+        # drop the reference and let GC close the underlying WebSocket.
         self._conn = None
-        if conn is None:
-            return
-        try:
-            await conn.async_close()
-        except Exception:
-            pass
+
+    async def focus_session(self, session_id: str, timeout: float = 3.0) -> bool:
+        """Focus the iTerm session whose `session_id` matches.
+
+        Uses the persistent Python API connection (reused across calls, with the
+        same backoff semantics as `get_sessions`). Returns True iff the session
+        was found AND all three activations (window, tab, session) completed
+        without raising. Returns False otherwise so callers can fall back to
+        the AppleScript path (#24).
+        """
+        if not _ITERM2_AVAILABLE:
+            return False
+        now = time.time()
+        if self._conn is None and (now - self._last_error_at) < _RECONNECT_BACKOFF_SECONDS:
+            return False
+
+        async with self._lock:
+            try:
+                if self._conn is None:
+                    self._conn = await asyncio.wait_for(iterm2.Connection.async_create(), timeout=timeout)
+                found = await asyncio.wait_for(self._activate(session_id), timeout=timeout)
+            except (TimeoutError, Exception) as e:  # noqa: BLE001
+                log.debug("iTerm focus_session failed, dropping connection: %s", e)
+                await self._drop_connection()
+                self._last_error_at = time.time()
+                return False
+            return found
+
+    async def _activate(self, session_id: str) -> bool:
+        assert self._conn is not None
+        app = await iterm2.async_get_app(self._conn)
+        if app is None:
+            return False
+        for window in app.windows:
+            for tab in window.tabs:
+                for session in tab.sessions:
+                    if str(session.session_id) == session_id:
+                        await window.async_activate()
+                        await tab.async_select()
+                        await session.async_activate()
+                        return True
+        return False
 
     async def close(self) -> None:
         async with self._lock:

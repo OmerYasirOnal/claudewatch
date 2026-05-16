@@ -170,8 +170,24 @@ async def focus(pid: int, request: Request):
         if not r.stdout.strip():
             raise HTTPException(409, "session is in detached tmux; no UI to focus")
 
+    # #24: Prefer the persistent Python-API path — match on the iTerm session
+    # UUID (always unique within a running iTerm) rather than the (window_id,
+    # tab_id) tuple, which can race when tabs are moved or windows reordered.
+    # If the API path can't find the session (e.g. iTerm restarted, or the
+    # connection is in backoff), we fall through to the existing AppleScript
+    # branches below.
+    iterm_manager = getattr(request.app.state.s, "iterm_manager", None)
+    api_focused = False
+    if iterm_manager is not None and sess.iterm_session_id:
+        try:
+            api_focused = await iterm_manager.focus_session(sess.iterm_session_id)
+        except Exception as e:  # noqa: BLE001
+            log.debug("iterm_manager.focus_session raised: %s", e)
+            api_focused = False
     try:
-        if sess.iterm_tty:
+        if api_focused:
+            pass  # Python-API path handled it; skip AppleScript.
+        elif sess.iterm_tty:
             r = subprocess.run(
                 [
                     "osascript",

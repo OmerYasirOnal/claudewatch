@@ -49,7 +49,7 @@ def populated_app(app, tmp_path):
         memory_mb=512.0,
         status="working",
         location_type="iterm",
-        iterm_window_id=42,
+        iterm_window_id="42",
         iterm_tab_index=1,
         iterm_tty="/dev/ttys001",
         last_activity_at=now,
@@ -89,7 +89,7 @@ def test_sessions_get_single_returns_full_object(populated_app):
     r = client.get("/api/sessions/12345")
     assert r.status_code == 200
     d = r.json()
-    assert d["iterm_window_id"] == 42
+    assert d["iterm_window_id"] == "42"
     assert d["tool_calls"]["total"] == 3
     assert d["tool_calls"]["breakdown"] == {"Edit": 2, "Bash": 1}
     assert d["permission_mode"] == "dangerously-skip"
@@ -243,3 +243,61 @@ def test_log_tail_shows_text_when_show_log_text_true(populated_app, tmp_path):
     data = r.json()
     assert data["privacy_mode"] is False
     assert data["entries"][0]["message"]["content"][0]["text"] == "hello"
+
+
+def test_focus_uses_iterm_manager_when_session_id_present(populated_app, monkeypatch):
+    """#24: when the session has an iterm_session_id and the iterm_manager is
+    available, /focus must call focus_session on it and NOT shell out to
+    osascript."""
+    from unittest.mock import AsyncMock
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_tty = None  # ensure we don't hit the tty AppleScript branch
+    sess.iterm_window_id = "pty-UUID-1"
+    sess.iterm_tab_id = "3"
+    sess.iterm_session_id = "iterm-sess-xyz"
+
+    fake_mgr = AsyncMock()
+    fake_mgr.focus_session = AsyncMock(return_value=True)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError(f"osascript should not be invoked; got {args[0]!r}")
+
+    monkeypatch.setattr("backend.api.actions.subprocess.run", fail_run)
+
+    r = client.post(f"/api/sessions/{sess.pid}/focus")
+    assert r.status_code == 200
+    assert r.json() == {"success": True}
+    fake_mgr.focus_session.assert_awaited_once_with("iterm-sess-xyz")
+
+
+def test_focus_falls_back_to_applescript_when_manager_returns_false(populated_app, monkeypatch):
+    """#24: when focus_session returns False, /focus must fall through to the
+    existing AppleScript paths."""
+    import subprocess as _sub
+    from unittest.mock import AsyncMock
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_tty = "/dev/ttys009"  # AppleScript-by-tty path
+    sess.iterm_window_id = None
+    sess.iterm_tab_id = None
+    sess.iterm_session_id = "iterm-sess-missing"
+
+    fake_mgr = AsyncMock()
+    fake_mgr.focus_session = AsyncMock(return_value=False)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return _sub.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("backend.api.actions.subprocess.run", fake_run)
+
+    r = client.post(f"/api/sessions/{sess.pid}/focus")
+    assert r.status_code == 200
+    fake_mgr.focus_session.assert_awaited_once_with("iterm-sess-missing")
+    # AppleScript-by-tty fallback ran.
+    assert any("focus_by_tty.applescript" in part for call in calls for part in call)
