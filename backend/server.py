@@ -84,6 +84,7 @@ async def _scheduler_loop(s: AppState) -> None:
 async def lifespan(app: FastAPI):
     cfg = load_config()
     state = State(STATE_DB)
+    await state.connect()
     await state.init_db()
     await state.prune()
     fs_watcher = FilesystemWatcher(
@@ -103,6 +104,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         await fs_watcher.stop_all()
+        await state.close()
 
 
 def create_app() -> FastAPI:

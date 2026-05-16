@@ -33,65 +33,79 @@ class State:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn: aiosqlite.Connection | None = None
+
+    async def connect(self) -> None:
+        if self._conn is None:
+            self._conn = await aiosqlite.connect(self.db_path)
+            self._conn.row_factory = aiosqlite.Row
+
+    async def close(self) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
 
     async def init_db(self) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executescript(_SCHEMA)
-            await db.commit()
+        await self.connect()
+        assert self._conn is not None
+        await self._conn.executescript(_SCHEMA)
+        await self._conn.commit()
 
     async def upsert_active(self, session: ClaudeSession) -> None:
+        await self.connect()
+        assert self._conn is not None
         now = datetime.now(UTC).isoformat()
         total = session.usage.total_tokens if session.usage else 0
         cost = session.usage.cost_estimate_usd if session.usage else None
         summary = session.model_dump_json()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO sessions (pid, started_at, ended_at, last_seen, cwd, model, total_tokens, cost_estimate, summary_json)
-                VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pid, started_at) DO UPDATE SET
-                    last_seen=excluded.last_seen,
-                    cwd=excluded.cwd,
-                    model=excluded.model,
-                    total_tokens=excluded.total_tokens,
-                    cost_estimate=excluded.cost_estimate,
-                    summary_json=excluded.summary_json
-                """,
-                (
-                    session.pid,
-                    session.started_at.isoformat(),
-                    now,
-                    session.cwd,
-                    session.model,
-                    total,
-                    cost,
-                    summary,
-                ),
-            )
-            await db.commit()
+        await self._conn.execute(
+            """
+            INSERT INTO sessions (pid, started_at, ended_at, last_seen, cwd, model, total_tokens, cost_estimate, summary_json)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(pid, started_at) DO UPDATE SET
+                last_seen=excluded.last_seen,
+                cwd=excluded.cwd,
+                model=excluded.model,
+                total_tokens=excluded.total_tokens,
+                cost_estimate=excluded.cost_estimate,
+                summary_json=excluded.summary_json
+            """,
+            (
+                session.pid,
+                session.started_at.isoformat(),
+                now,
+                session.cwd,
+                session.model,
+                total,
+                cost,
+                summary,
+            ),
+        )
+        await self._conn.commit()
 
     async def mark_ended(self, pid: int, started_at: datetime) -> None:
+        await self.connect()
+        assert self._conn is not None
         now = datetime.now(UTC).isoformat()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "UPDATE sessions SET ended_at=? WHERE pid=? AND started_at=? AND ended_at IS NULL",
-                (now, pid, started_at.isoformat()),
-            )
-            await db.commit()
+        await self._conn.execute(
+            "UPDATE sessions SET ended_at=? WHERE pid=? AND started_at=? AND ended_at IS NULL",
+            (now, pid, started_at.isoformat()),
+        )
+        await self._conn.commit()
 
     async def list_history(self, hours: int = 24) -> list[dict]:
+        await self.connect()
+        assert self._conn is not None
         cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await db.execute_fetchall(
-                """
-                SELECT pid, started_at, ended_at, last_seen, cwd, model, total_tokens, cost_estimate, summary_json
-                FROM sessions
-                WHERE ended_at IS NOT NULL AND ended_at >= ?
-                ORDER BY ended_at DESC
-                """,
-                (cutoff,),
-            )
+        rows = await self._conn.execute_fetchall(
+            """
+            SELECT pid, started_at, ended_at, last_seen, cwd, model, total_tokens, cost_estimate, summary_json
+            FROM sessions
+            WHERE ended_at IS NOT NULL AND ended_at >= ?
+            ORDER BY ended_at DESC
+            """,
+            (cutoff,),
+        )
         out: list[dict] = []
         for row in rows:
             d = dict(row)
@@ -103,28 +117,29 @@ class State:
         return out
 
     async def stats_today(self) -> dict:
+        await self.connect()
+        assert self._conn is not None
         cutoff = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            row = await db.execute_fetchall(
-                """
-                SELECT COUNT(*) AS sessions_today,
-                       COALESCE(SUM(total_tokens), 0) AS tokens_today,
-                       COALESCE(SUM(cost_estimate), 0) AS cost_today
-                FROM sessions
-                WHERE last_seen >= ?
-                """,
-                (cutoff,),
-            )
+        row = await self._conn.execute_fetchall(
+            """
+            SELECT COUNT(*) AS sessions_today,
+                   COALESCE(SUM(total_tokens), 0) AS tokens_today,
+                   COALESCE(SUM(cost_estimate), 0) AS cost_today
+            FROM sessions
+            WHERE last_seen >= ?
+            """,
+            (cutoff,),
+        )
         if not row:
             return {"sessions_today": 0, "tokens_today": 0, "cost_today": 0.0}
         return dict(row[0])
 
     async def prune(self, hours: int = 48) -> None:
+        await self.connect()
+        assert self._conn is not None
         cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
-                (cutoff,),
-            )
-            await db.commit()
+        await self._conn.execute(
+            "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
+            (cutoff,),
+        )
+        await self._conn.commit()
