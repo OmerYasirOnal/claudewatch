@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from backend.cli import _wait_for_server_ready
+from backend.cli import _rotate_log_if_large, _wait_for_server_ready
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -63,3 +63,64 @@ def test_wait_for_server_ready_returns_false_when_server_is_down():
     # Should respect timeout and not hang.
     elapsed = time.time() - start
     assert 0.4 < elapsed < 3.0
+
+
+# --- log rotation ----------------------------------------------------------
+
+
+def test_rotate_log_shifts_files(tmp_path):
+    """When the log exceeds max_bytes, rotate to .1; do it again → .1 + .2."""
+    log_path = tmp_path / "server.log"
+    log_path.write_bytes(b"x" * 100)
+
+    _rotate_log_if_large(log_path, max_bytes=10, keep=5)
+    assert not log_path.exists()
+    assert (tmp_path / "server.log.1").exists()
+    assert (tmp_path / "server.log.1").read_bytes() == b"x" * 100
+
+    # Second rotation: write a fresh log, rotate again.
+    log_path.write_bytes(b"y" * 100)
+    _rotate_log_if_large(log_path, max_bytes=10, keep=5)
+    assert not log_path.exists()
+    assert (tmp_path / "server.log.1").exists()
+    assert (tmp_path / "server.log.1").read_bytes() == b"y" * 100
+    assert (tmp_path / "server.log.2").exists()
+    assert (tmp_path / "server.log.2").read_bytes() == b"x" * 100
+
+
+def test_rotate_log_drops_oldest(tmp_path):
+    """If .1 .. .keep already exist, rotation drops .keep and shifts the rest."""
+    log_path = tmp_path / "server.log"
+    log_path.write_bytes(b"NEW" * 100)
+    for i in range(1, 6):
+        (tmp_path / f"server.log.{i}").write_bytes(f"old-{i}".encode())
+
+    _rotate_log_if_large(log_path, max_bytes=10, keep=5)
+
+    # The current log becomes .1.
+    assert (tmp_path / "server.log.1").read_bytes() == b"NEW" * 100
+    # The old .1 .. .4 shift to .2 .. .5.
+    assert (tmp_path / "server.log.2").read_bytes() == b"old-1"
+    assert (tmp_path / "server.log.3").read_bytes() == b"old-2"
+    assert (tmp_path / "server.log.4").read_bytes() == b"old-3"
+    assert (tmp_path / "server.log.5").read_bytes() == b"old-4"
+    # The old .5 must be dropped — there is no .6.
+    assert not (tmp_path / "server.log.6").exists()
+
+
+def test_rotate_log_noop_when_small(tmp_path):
+    """A file smaller than max_bytes is left untouched."""
+    log_path = tmp_path / "server.log"
+    log_path.write_bytes(b"tiny")
+
+    _rotate_log_if_large(log_path, max_bytes=10 * 1024, keep=5)
+    assert log_path.exists()
+    assert log_path.read_bytes() == b"tiny"
+    assert not (tmp_path / "server.log.1").exists()
+
+
+def test_rotate_log_noop_when_missing(tmp_path):
+    """A missing log file is also a no-op (no crash)."""
+    log_path = tmp_path / "does-not-exist.log"
+    _rotate_log_if_large(log_path, max_bytes=10, keep=5)
+    assert not log_path.exists()

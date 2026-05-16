@@ -28,6 +28,7 @@ from backend.detectors.iterm_detector import (
 )
 from backend.detectors.linker import LinkerState, build_sessions
 from backend.models import ClaudeSession
+from backend.notifications import notify
 from backend.state import State
 
 log = logging.getLogger("claudewatch")
@@ -78,6 +79,9 @@ class AppState:
     # Diff cache: previous broadcast hash per pid, so session.updated only fires
     # when the dump actually changes.
     session_hashes: dict[int, str] = field(default_factory=dict)
+    # PIDs we've already fired a "high cost" notification for, so we don't
+    # spam every tick after the threshold has been crossed.
+    notified_high_cost_pids: set[int] = field(default_factory=set)
     last_prune_at: float = 0.0
     # Set on lifespan shutdown so SSE generators (and any other long-lived
     # awaiters) can wake immediately instead of waiting for their next timeout.
@@ -128,6 +132,8 @@ async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
     """
     prev = s.sessions
     new_map = {x.pid: x for x in new_sessions}
+    notif_cfg = s.config.get("notifications", {}) or {}
+    notif_enabled = bool(notif_cfg.get("enabled"))
 
     for pid, sess in new_map.items():
         if pid not in prev:
@@ -142,6 +148,30 @@ async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
         if s.state:
             await s.state.upsert_active(sess)
 
+        # High-cost notification — fire once per pid when cost crosses the
+        # configured threshold. Don't await; osascript can block.
+        if (
+            notif_enabled
+            and notif_cfg.get("on_high_cost")
+            and sess.usage
+            and sess.usage.cost_estimate_usd is not None
+            and pid not in s.notified_high_cost_pids
+        ):
+            try:
+                threshold = float(notif_cfg.get("cost_threshold_usd", 5.0))
+            except (TypeError, ValueError):
+                threshold = 5.0
+            cost = sess.usage.cost_estimate_usd
+            if cost >= threshold:
+                asyncio.create_task(
+                    notify(
+                        title="Claude session: high cost",
+                        message=f"PID {pid} reached ${cost:.2f}",
+                        subtitle=sess.cwd or "",
+                    )
+                )
+                s.notified_high_cost_pids.add(pid)
+
     for pid in list(prev.keys()):
         if pid not in new_map:
             await s.broadcast({"event": "session.ended", "pid": pid})
@@ -149,6 +179,16 @@ async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
             if s.state:
                 started = s.sessions_started_at.pop(pid, prev[pid].started_at)
                 await s.state.mark_ended(pid, started)
+            if notif_enabled and notif_cfg.get("on_session_end"):
+                duration = prev[pid].duration_seconds
+                asyncio.create_task(
+                    notify(
+                        title="Claude session ended",
+                        message=f"PID {pid} after {duration}s",
+                        subtitle=prev[pid].cwd or "",
+                    )
+                )
+            s.notified_high_cost_pids.discard(pid)
 
     s.sessions = new_map
 
