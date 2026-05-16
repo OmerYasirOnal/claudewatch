@@ -24,6 +24,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "read_only": False,
     "privacy_mode": True,
     "show_log_text": False,
+    # Billing model the user is on. The backend always computes cost (so we can
+    # still surface plan-relative budgets etc.); the dashboard reads this and
+    # hides $ figures everywhere when the user isn't on a metered API plan.
+    "plan": "api",
     "file_change_retention_minutes": 10,
     "process_scan_interval_seconds": 2,
     "iterm_refresh_interval_seconds": 5,
@@ -52,6 +56,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # returns 403. Flipping this gives the dashboard the ability to type
         # text into running Claude sessions via the iTerm Python API.
         "enabled": False,
+    },
+    "editor": {
+        # Opt-in: when False (the default), POST /api/files/open returns 403.
+        # When enabled, the dashboard can shell out to ``command`` to open a
+        # file from the Files panel. ``command`` is validated against a strict
+        # allow-list character class on the API side.
+        "enabled": False,
+        "command": "code",
     },
     "pricing": {
         "claude-opus-4-7": {
