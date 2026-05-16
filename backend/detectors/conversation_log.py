@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from backend.models import TokenUsage, ToolCallStats
@@ -88,8 +88,15 @@ class ParsedLog:
     current_task_started_at: datetime | None = None
 
 
-def parse_log(path: Path) -> ParsedLog:
-    """Walk all JSONL entries and aggregate into ParsedLog. Robust to schema drift."""
+def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
+    """Walk all JSONL entries and aggregate into ParsedLog. Robust to schema drift.
+
+    `now` is the reference time used to decide whether a `tool_use` stop_reason
+    still counts as in-flight (see Issue #7). Defaults to current UTC time;
+    tests inject a fixed value.
+    """
+    if now is None:
+        now = datetime.now(UTC)
     pl = ParsedLog(conversation_id=path.stem, log_path=path)
     breakdown: dict[str, int] = {}
     last_tool_used: str | None = None
@@ -183,16 +190,19 @@ def parse_log(path: Path) -> ParsedLog:
                                     tid = str(inp.get("taskId") or "")
                                     status = inp.get("status")
                                     if status == "in_progress":
-                                        # Look up subject: prefer task created in this file with matching index
+                                        # Look up subject by 1-based taskId index within THIS file.
+                                        # If taskId is out-of-range it was created in a prior log file
+                                        # we can't see — fall back to a synthetic subject (Issue #13).
                                         subject = None
                                         active_form = None
                                         try:
-                                            int(tid)  # validate format; matching by index is Bug #12
-                                            if tasks_created_here:
-                                                # Best match: the last TaskCreate before this update
-                                                t = tasks_created_here[-1]
+                                            idx = int(tid)
+                                            if 1 <= idx <= len(tasks_created_here):
+                                                t = tasks_created_here[idx - 1]
                                                 subject = t["subject"]
                                                 active_form = t["active_form"]
+                                            else:
+                                                subject = f"Task #{tid}"
                                         except (TypeError, ValueError):
                                             pass
                                         current_in_progress = {
@@ -219,6 +229,13 @@ def parse_log(path: Path) -> ParsedLog:
         pl.current_task_subject = current_in_progress.get("subject")
         pl.current_task_active_form = current_in_progress.get("active_form")
         pl.current_task_started_at = current_in_progress_started_at
+    # Issue #7: a tool_use stop_reason left dangling from a user-halted session
+    # would keep the UI showing "in-flight" forever. Clear it once the last
+    # assistant entry is older than the recency window.
+    if pl.is_in_flight and pl.last_assistant_at is not None:
+        age = (now - pl.last_assistant_at).total_seconds()
+        if age >= 60:
+            pl.is_in_flight = False
     return pl
 
 
