@@ -38,3 +38,14 @@ def test_annotate_usage_sets_cost():
     u = TokenUsage(input_tokens=1_000_000)
     annotate_usage("claude-opus-4-7", u, PRICING)
     assert u.cost_estimate_usd == 15.0
+
+
+def test_estimate_cost_handles_non_string_model():
+    """Guard for #31: a non-string `model` (list/dict from a botched config
+    parse) used to crash on dict.get with TypeError("unhashable type").
+    Should now early-return None instead of taking down the scheduler tick."""
+    u = TokenUsage(input_tokens=100)
+    assert estimate_cost(["weird"], u, PRICING) is None
+    assert estimate_cost({"oops": 1}, u, PRICING) is None
+    assert estimate_cost(123, u, PRICING) is None
+    assert estimate_cost("", u, PRICING) is None

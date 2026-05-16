@@ -92,10 +92,37 @@ def _update_cpu_history(state: LinkerState, pid: int, cpu: float) -> CpuHistory:
     return h
 
 
-def _prune_cpu_history(state: LinkerState, alive_pids: set[int]) -> None:
+def _prune_caches(
+    state: LinkerState,
+    alive_pids: set[int],
+    alive_cwds: set[str],
+) -> None:
+    """Drop per-pid / per-cwd cache entries for processes that are gone.
+
+    Without this, a long-running daemon accumulates one cpu_history dict entry
+    per distinct pid ever observed, one git_cache entry per distinct cwd ever
+    observed, and one log_cache entry per distinct conversation log ever read
+    (see #48).
+    """
     for pid in list(state.cpu_history.keys()):
         if pid not in alive_pids:
             state.cpu_history.pop(pid, None)
+    for cwd in list(state.git_cache.keys()):
+        if cwd not in alive_cwds:
+            state.git_cache.pop(cwd, None)
+    # log_cache keys are arbitrary Paths under ~/.claude/projects/<dashed>/.
+    # We can't cheaply map them back to a cwd (path-mangling rules differ by
+    # Claude Code version), so we evict by recency instead: drop any entry whose
+    # underlying file hasn't been touched in 10 minutes, or whose file is gone.
+    cutoff = time.time() - 600
+    for path in list(state.log_cache.keys()):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            state.log_cache.pop(path, None)
+            continue
+        if mtime < cutoff:
+            state.log_cache.pop(path, None)
 
 
 async def build_sessions(
@@ -111,13 +138,17 @@ async def build_sessions(
     cadence by the iTerm scheduler in `server.py` and passed in via the
     `iterm_loc_map` / `iterm_tty_map` parameters.
     """
-    if state.log_dir is None:
+    # Re-resolve log_dir whenever it's not a valid dir — covers the case where
+    # Claude Code wasn't installed when the daemon started but has since been
+    # installed, or where the user wiped ~/.claude (#49). Cheap: 3 is_dir calls.
+    if state.log_dir is None or not state.log_dir.is_dir():
         state.log_dir = find_log_dir()
 
     procs: list[ProcInfo] = await asyncio.to_thread(scan_claude_processes)
     pids = [p.pid for p in procs]
     pid_set = set(pids)
-    _prune_cpu_history(state, pid_set)
+    alive_cwds = {p.cwd for p in procs if p.cwd}
+    _prune_caches(state, pid_set, alive_cwds)
 
     tmux_loc_map = await asyncio.to_thread(link_pids_to_tmux, pids)
     iterm_loc_map = iterm_loc_map or {}
@@ -171,10 +202,9 @@ async def build_sessions(
 
         def _apply_iterm_tty(iloc: Any) -> None:
             nonlocal iterm_window_id, iterm_tab_index, iterm_session_id, iterm_tab_title, iterm_tty
-            # ItermTtyLocation.window_id is int (from `id of window` AppleScript
-            # output); the SessionStatus model field is str | None (#22), so
-            # stringify on the way in.
-            iterm_window_id = str(iloc.window_id) if iloc.window_id is not None else None
+            # ItermTtyLocation.window_id is str now (#36) — matches SessionStatus
+            # field type, so no bridging needed.
+            iterm_window_id = iloc.window_id
             iterm_tab_index = iloc.tab_index
             iterm_session_id = iloc.unique_id
             iterm_tab_title = iloc.name

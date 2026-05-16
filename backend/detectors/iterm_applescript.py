@@ -21,7 +21,7 @@ LIST_SCRIPT = APPLESCRIPT_DIR / "list_iterm_sessions.applescript"
 
 @dataclass
 class ItermSessionTty:
-    window_id: int
+    window_id: str
     tab_index: int
     tty: str
     unique_id: str
@@ -30,7 +30,7 @@ class ItermSessionTty:
 
 @dataclass
 class ItermTtyLocation:
-    window_id: int
+    window_id: str
     tab_index: int
     tty: str
     unique_id: str
@@ -60,8 +60,10 @@ def list_iterm_sessions_via_applescript(timeout: float = 3.0) -> list[ItermSessi
         parts = line.split("|", 4)
         if len(parts) < 5:
             continue
+        window_id = parts[0].strip()
+        if not window_id:
+            continue
         try:
-            window_id = int(parts[0])
             tab_index = int(parts[1])
         except ValueError:
             continue
