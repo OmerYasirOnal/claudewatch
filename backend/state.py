@@ -236,3 +236,17 @@ class State:
             (cutoff,),
         )
         await self._conn.commit()
+
+    async def count_sessions(self) -> int:
+        """Return total row count of the ``sessions`` table.
+
+        Used by the admin status endpoint to surface DB size in the UI; cheap
+        on the sizes this DB ever reaches (history is pruned by ``prune``),
+        but kept as its own method so callers don't have to know the SQL.
+        """
+        await self.connect()
+        assert self._conn is not None
+        rows = await self._conn.execute_fetchall("SELECT COUNT(*) AS n FROM sessions")
+        if not rows:
+            return 0
+        return int(dict(rows[0])["n"])

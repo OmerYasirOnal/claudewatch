@@ -23,6 +23,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from backend.api import actions, config_api, files, health, history, insights, sessions, stream
+from backend.api import actions, admin, config_api, files, health, history, insights, sessions, stream
 from backend.config import STATE_DB, load_config
 from backend.detectors.filesystem_watch import FilesystemWatcher
 from backend.detectors.iterm_applescript import (
@@ -107,6 +108,12 @@ class AppState:
     # awaiters) can wake immediately instead of waiting for their next timeout.
     # See issue #27.
     shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Wall-clock instant at which the AppState was constructed. Surfaced by
+    # /api/admin/status for uptime + process-age reporting. Using a
+    # default_factory means lifespan can construct AppState without needing
+    # to pass it explicitly; tests that instantiate AppState directly also
+    # get a sensible value.
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     async def broadcast(self, event: dict) -> None:
         for q in list(self.sse_queues):
@@ -498,6 +505,7 @@ def create_app() -> FastAPI:
     app.include_router(config_api.router)
     app.include_router(insights.router)
     app.include_router(files.router)
+    app.include_router(admin.router)
 
     if FRONTEND_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")

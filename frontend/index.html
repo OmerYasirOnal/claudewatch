@@ -54,11 +54,11 @@
         <span class="px-2 py-0.5 rounded-full border" :class="health.log_dir_found === null ? 'border-zinc-700 text-zinc-400' : (health.log_dir_found ? 'border-emerald-500/40 text-emerald-300' : 'border-amber-500/40 text-amber-300')">logs <span x-text="health.log_dir_found === null ? '…' : (health.log_dir_found ? '✓' : '✗')"></span></span>
       </div>
       <nav class="flex items-center gap-1 ml-4 text-sm">
-        <button class="px-3 py-1.5 rounded-md" :class="view==='dashboard' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='dashboard'">Dashboard</button>
-        <button class="px-3 py-1.5 rounded-md" :class="view==='insights' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='insights'; loadInsights()">Insights</button>
-        <button class="px-3 py-1.5 rounded-md" :class="view==='files' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='files'">Files</button>
-        <button class="px-3 py-1.5 rounded-md" :class="view==='history' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='history'; loadHistory()">History</button>
-        <button class="px-3 py-1.5 rounded-md" :class="view==='settings' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='settings'">Settings</button>
+        <button class="px-3 py-1.5 rounded-md" :class="view==='dashboard' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('dashboard')">Dashboard</button>
+        <button class="px-3 py-1.5 rounded-md" :class="view==='insights' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('insights'); if (view==='insights') loadInsights()">Insights</button>
+        <button class="px-3 py-1.5 rounded-md" :class="view==='files' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('files')">Files</button>
+        <button class="px-3 py-1.5 rounded-md" :class="view==='history' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('history'); if (view==='history') loadHistory()">History</button>
+        <button class="px-3 py-1.5 rounded-md" :class="view==='settings' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('settings')">Settings</button>
       </nav>
       <div class="flex-1"></div>
       <div class="relative">
@@ -685,15 +685,45 @@
     </div>
 
     <!-- Settings view -->
-    <div x-show="view==='settings'" class="space-y-6 max-w-2xl">
-      <h2 class="text-xl font-semibold">Settings</h2>
-      <p class="text-sm text-zinc-400">Edits save to <code class="text-emerald-300">~/.claudewatch/config.toml</code>.</p>
+    <div x-show="view==='settings'" class="max-w-2xl">
+
+      <!-- Sticky save bar -->
+      <div class="sticky top-[60px] z-10 bg-zinc-950 border-b border-zinc-800 -mx-6 px-6 py-3 mb-6 flex items-center gap-3">
+        <span class="text-sm font-medium">Settings</span>
+        <span x-show="configDirty" class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30">
+          Unsaved changes
+        </span>
+        <span x-show="configSavingState==='saving'" class="text-xs text-zinc-400">
+          Saving…
+        </span>
+        <span x-show="configSavingState==='saved'" class="text-xs text-emerald-400">
+          ✓ Saved
+        </span>
+        <span x-show="configSavingState==='error'" x-text="'✗ ' + configSaveError" class="text-xs text-red-400"></span>
+        <div class="flex-1"></div>
+        <button
+          @click="revertConfig()"
+          :disabled="!configDirty"
+          class="px-3 py-1.5 rounded-md border border-zinc-700 text-sm hover:border-zinc-600 disabled:opacity-40 disabled:cursor-not-allowed">
+          Discard
+        </button>
+        <button
+          @click="saveConfigDraft()"
+          :disabled="!configDirty || configSavingState==='saving'"
+          class="px-4 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed">
+          <span x-show="configSavingState!=='saving'">Save changes</span>
+          <span x-show="configSavingState==='saving'">Saving…</span>
+        </button>
+      </div>
+
+      <div class="space-y-6">
+      <p class="text-sm text-zinc-400">Edits save to <code class="text-emerald-300">~/.claudewatch/config.toml</code> when you click <span class="text-emerald-300">Save changes</span>.</p>
 
       <!-- Plan -->
       <section class="mb-8">
         <h2 class="text-lg font-semibold mb-3">Plan</h2>
         <p class="text-sm text-zinc-400 mb-4">For Max/Pro users, dollar costs are hidden since you pay a flat monthly fee. Token usage stays visible.</p>
-        <select x-model="config.plan" @change="saveConfig({plan: config.plan})" class="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm">
+        <select x-model="configDraft.plan" @change="markConfigDirty()" class="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm">
           <option value="api">API (pay-per-token — show $)</option>
           <option value="pro">Pro ($20/mo flat — hide $)</option>
           <option value="max">Max 5× (hide $)</option>
@@ -709,13 +739,13 @@
         <p class="text-sm text-zinc-400 mb-3">Allow the dashboard to open files (from the Files tab) in your editor of choice.</p>
         <label class="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40">
           <span class="text-sm">Enable 'Open in editor' (allows the dashboard to open files in your editor)</span>
-          <input type="checkbox" x-model="config.editor.enabled" @change="saveEditorConfig()" class="size-4 accent-emerald-500" />
+          <input type="checkbox" x-model="configDraft.editor.enabled" @change="markConfigDirty()" class="size-4 accent-emerald-500" />
         </label>
         <label class="block mt-3">
           <span class="text-xs text-zinc-400 uppercase tracking-wide">Editor command</span>
           <input type="text"
-                 x-model="config.editor.command"
-                 @change="saveEditorConfig()"
+                 x-model="configDraft.editor.command"
+                 @input="markConfigDirty()"
                  placeholder="code, cursor, subl, ..."
                  class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 font-mono text-xs" />
         </label>
@@ -723,28 +753,29 @@
       <div class="space-y-3">
         <label class="flex items-center justify-between gap-3">
           <span class="text-sm">Read-only mode (disables focus/halt/new actions)</span>
-          <input type="checkbox" x-model="config.read_only" @change="saveConfig({read_only: config.read_only})" />
+          <input type="checkbox" x-model="configDraft.read_only" @change="markConfigDirty()" />
         </label>
         <label class="flex items-center justify-between gap-3">
           <span class="text-sm">Privacy mode (hide output)</span>
-          <input type="checkbox" x-model="config.privacy_mode" @change="saveConfig({privacy_mode: config.privacy_mode})" />
+          <input type="checkbox" x-model="configDraft.privacy_mode" @change="markConfigDirty()" />
         </label>
         <label class="flex items-center justify-between gap-3">
           <span class="text-sm">Show log text (otherwise only metadata)</span>
-          <input type="checkbox" x-model="config.show_log_text" @change="saveConfig({show_log_text: config.show_log_text})" />
+          <input type="checkbox" x-model="configDraft.show_log_text" @change="markConfigDirty()" />
         </label>
         <label class="flex items-center justify-between gap-3">
           <span class="text-sm">File change retention (minutes)</span>
           <input type="number" min="1" max="120" class="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 w-24 text-right"
-                 x-model.number="config.file_change_retention_minutes"
-                 @change="saveConfig({file_change_retention_minutes: config.file_change_retention_minutes})" />
+                 x-model.number="configDraft.file_change_retention_minutes"
+                 @input="markConfigDirty()" />
         </label>
       </div>
 
       <!-- F7 Appearance -->
       <section>
         <h3 class="text-lg font-medium mb-2">Appearance</h3>
-        <p class="text-sm text-zinc-400 mb-3">Saved in this browser.</p>
+        <p class="text-sm text-zinc-400 mb-1">Saved in this browser.</p>
+        <p class="text-xs text-zinc-500 italic mb-3">These display preferences are saved in your browser, not the backend.</p>
         <div class="flex items-center gap-3 text-sm">
           <label class="flex items-center gap-2"><input type="radio" value="dark" x-model="appearance" @change="saveAppearance()"> Dark</label>
           <label class="flex items-center gap-2"><input type="radio" value="light" x-model="appearance" @change="saveAppearance()"> Light</label>
@@ -754,6 +785,7 @@
       <!-- F8 Density -->
       <section>
         <h3 class="text-lg font-medium mb-2">Dashboard layout</h3>
+        <p class="text-xs text-zinc-500 italic mb-3">Browser-only preference.</p>
         <div class="flex items-center gap-3 text-sm">
           <label class="flex items-center gap-2"><input type="radio" value="comfortable" x-model="density" @change="saveDensity()"> Comfortable</label>
           <label class="flex items-center gap-2"><input type="radio" value="compact" x-model="density" @change="saveDensity()"> Compact</label>
@@ -770,8 +802,8 @@
         <label class="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40">
           <span class="text-sm">Allow sending messages to live Claude sessions from the dashboard</span>
           <input type="checkbox"
-                 x-model="config.remote_control.enabled"
-                 @change="saveRemoteControl()"
+                 x-model="configDraft.remote_control.enabled"
+                 @change="markConfigDirty()"
                  class="size-4 accent-emerald-500" />
         </label>
       </section>
@@ -782,32 +814,33 @@
         <div class="space-y-2 text-sm">
           <label class="flex items-center justify-between gap-3">
             <span>Enable notifications</span>
-            <input type="checkbox" x-model="config.notifications.enabled" @change="saveNotificationConfig()" />
+            <input type="checkbox" x-model="configDraft.notifications.enabled" @change="markConfigDirty()" />
           </label>
           <label class="flex items-center justify-between gap-3">
             <span>On session end</span>
-            <input type="checkbox" x-model="config.notifications.on_session_end" @change="saveNotificationConfig()" />
+            <input type="checkbox" x-model="configDraft.notifications.on_session_end" @change="markConfigDirty()" />
           </label>
           <label class="flex items-center justify-between gap-3" :class="!showCost() ? 'opacity-50' : ''">
             <span>
               On high cost
               <template x-if="!showCost()"><span class="text-[11px] text-amber-300/80 block">Hidden because plan != API</span></template>
             </span>
-            <input type="checkbox" x-model="config.notifications.on_high_cost" @change="saveNotificationConfig()" :disabled="!showCost()" />
+            <input type="checkbox" x-model="configDraft.notifications.on_high_cost" @change="markConfigDirty()" :disabled="!showCost()" />
           </label>
           <label class="flex items-center justify-between gap-3" :class="!showCost() ? 'opacity-50' : ''">
             <span>High-cost threshold (USD)</span>
             <input type="number" step="0.5" min="0" class="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 w-24 text-right"
-                   x-model.number="config.notifications.cost_threshold_usd"
+                   x-model.number="configDraft.notifications.cost_threshold_usd"
                    :disabled="!showCost()"
-                   @change="saveNotificationConfig()" />
+                   @input="markConfigDirty()" />
           </label>
         </div>
       </section>
 
       <section class="mb-8">
         <h2 class="text-lg font-semibold mb-3">Dashboard cards</h2>
-        <p class="text-sm text-zinc-400 mb-4">Toggle which summary cards appear at the top of the dashboard. Preferences are saved in this browser.</p>
+        <p class="text-sm text-zinc-400 mb-1">Toggle which summary cards appear at the top of the dashboard.</p>
+        <p class="text-xs text-zinc-500 italic mb-4">These display preferences are saved in your browser, not the backend.</p>
         <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
           <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40 cursor-pointer hover:border-zinc-700">
             <input type="checkbox" x-model="cardVisibility.active" @change="saveCardVisibility()" class="size-4 accent-emerald-500">
@@ -840,7 +873,8 @@
 
       <div>
         <h3 class="text-lg font-medium mb-2">Pricing (USD per million tokens)</h3>
-        <p class="text-xs text-zinc-500 mb-3">Estimates only — verify at anthropic.com/pricing.</p>
+        <p class="text-xs text-zinc-500 mb-1">Estimates only — verify at anthropic.com/pricing.</p>
+        <p class="text-xs text-zinc-500 italic mb-3">Pricing edits save immediately — they don't go through the Save button above.</p>
         <div class="space-y-2">
           <template x-for="(rates, model) in (config.pricing || {})" :key="model">
             <div class="grid grid-cols-5 gap-2 items-center text-xs">
@@ -856,6 +890,7 @@
             </div>
           </template>
         </div>
+      </div>
       </div>
     </div>
   </main>
@@ -1031,7 +1066,7 @@
             <div class="text-[12px] rounded border border-amber-700/50 bg-amber-950/30 text-amber-200 px-3 py-2 flex items-center gap-2">
               <span>Remote control is disabled.</span>
               <button class="underline hover:text-white"
-                      @click="closeChat(); view='settings'; $nextTick(() => { const el=document.getElementById('settings-remote-control'); if (el && el.scrollIntoView) el.scrollIntoView({behavior:'smooth', block:'start'}); })">
+                      @click="closeChat(); switchView('settings'); $nextTick(() => { const el=document.getElementById('settings-remote-control'); if (el && el.scrollIntoView) el.scrollIntoView({behavior:'smooth', block:'start'}); })">
                 Go to Settings
               </button>
             </div>

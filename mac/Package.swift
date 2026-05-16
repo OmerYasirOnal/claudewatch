@@ -12,5 +12,10 @@ let package = Package(
             name: "ClaudeWatchTray",
             path: "Sources/ClaudeWatchTray"
         ),
+        .testTarget(
+            name: "ClaudeWatchTrayTests",
+            dependencies: ["ClaudeWatchTray"],
+            path: "Tests/ClaudeWatchTrayTests"
+        ),
     ]
 )

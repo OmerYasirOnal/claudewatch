@@ -1,5 +1,7 @@
 # ClaudeWatch — native macOS app
 
+![mac CI](https://github.com/OmerYasirOnal/claudewatch/actions/workflows/mac-ci.yml/badge.svg)
+
 A standalone .app for monitoring your local Claude Code sessions. Drag to
 `/Applications`, double-click, done — no Python install required.
 
@@ -131,6 +133,23 @@ make run
 
 If you only need to iterate on the backend, `claudewatch start --daemon` still
 works in parallel. The Swift app will detect it and go into `.external` state.
+
+## Test
+
+The Swift target ships with an XCTest suite covering JSON decoding for
+`Session` / `HealthReport`, the `APIClient` happy + error paths (via a
+`URLProtocol` mock — no real HTTP), the lenient `AppConfig` decoder, and
+smoke tests for `PythonRunner`'s port-busy / no-bundle branches.
+
+```bash
+cd mac
+make test            # or: swift test
+```
+
+The same suite runs on every push / PR that touches `mac/`, `backend/`, or
+`frontend/` via [`.github/workflows/mac-ci.yml`](../.github/workflows/mac-ci.yml).
+CI does **not** download python-build-standalone or assemble the `.app` — those
+need network and don't catch regressions worth the runtime cost.
 
 ## Distribution checklist
 

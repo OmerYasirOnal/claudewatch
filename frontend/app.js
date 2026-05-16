@@ -6,6 +6,10 @@ function appRoot() {
     stats: {},
     health: { iterm_api: null, tmux_available: null, log_dir_found: null, issues: [] },
     config: { pricing: {}, notifications: {}, remote_control: { enabled: false }, plan: "api", editor: { enabled: false, command: "code" } },
+    configDraft: {},
+    configDirty: false,
+    configSavingState: "idle",  // "idle" | "saving" | "saved" | "error"
+    configSaveError: "",
     filter: "All",
     filters: ["All", "iTerm", "Tmux", "Headless", "Working", "Idle", "High-cost", "Bookmarked"],
     detailPid: null,
@@ -252,10 +256,71 @@ function appRoot() {
           this.config = await r.json();
           this._normalizeConfig();
           this.chatRemoteEnabled = !!(this.config.remote_control && this.config.remote_control.enabled);
+          this._syncConfigDraft();
           return;
         }
       } catch (e) { /* ignore */ }
       this._setError(`Failed to load /api/config: HTTP ${r?.status ?? '???'}`);
+    },
+    _syncConfigDraft() {
+      this.configDraft = JSON.parse(JSON.stringify(this.config));
+      this._normalizeConfigDraft();
+      this.configDirty = false;
+    },
+    _normalizeConfigDraft() {
+      if (!this.configDraft.notifications) this.configDraft.notifications = {};
+      if (!this.configDraft.remote_control) this.configDraft.remote_control = { enabled: false };
+      if (!this.configDraft.plan) this.configDraft.plan = "api";
+      if (!this.configDraft.editor) this.configDraft.editor = { enabled: false, command: "code" };
+      if (typeof this.configDraft.editor.enabled !== "boolean") this.configDraft.editor.enabled = false;
+      if (!this.configDraft.editor.command) this.configDraft.editor.command = "code";
+    },
+    markConfigDirty() {
+      this.configDirty = JSON.stringify(this.configDraft) !== JSON.stringify(this.config);
+      // Reset transient status when user edits again after a save/error
+      if (this.configSavingState === "saved" || this.configSavingState === "error") {
+        this.configSavingState = "idle";
+        this.configSaveError = "";
+      }
+    },
+    revertConfig() {
+      this.configDraft = JSON.parse(JSON.stringify(this.config));
+      this._normalizeConfigDraft();
+      this.configDirty = false;
+      this.configSaveError = "";
+      this.configSavingState = "idle";
+    },
+    async saveConfigDraft() {
+      if (!this.configDirty) return;
+      this.configSavingState = "saving";
+      this.configSaveError = "";
+      try {
+        const r = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(this.configDraft),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${r.status}`);
+        }
+        this.config = await r.json();
+        this._normalizeConfig();
+        this.chatRemoteEnabled = !!(this.config.remote_control && this.config.remote_control.enabled);
+        this._syncConfigDraft();
+        this.configSavingState = "saved";
+        setTimeout(() => { if (this.configSavingState === "saved") this.configSavingState = "idle"; }, 2000);
+      } catch (e) {
+        this.configSavingState = "error";
+        this.configSaveError = String(e.message || e);
+      }
+    },
+    switchView(target) {
+      if (this.view === "settings" && this.configDirty) {
+        if (!confirm("You have unsaved settings changes. Discard them?")) return;
+        this.revertConfig();
+      }
+      this.view = target;
     },
     _normalizeConfig() {
       if (!this.config.notifications) this.config.notifications = {};
@@ -279,6 +344,10 @@ function appRoot() {
           this.config = await r.json();
           this._normalizeConfig();
           this.chatRemoteEnabled = !!(this.config.remote_control && this.config.remote_control.enabled);
+          // If no user-staged edits are pending, keep draft in lockstep so
+          // the pricing inline-edit (and similar bypass paths) don't
+          // accidentally show a phantom "Unsaved changes" badge.
+          if (!this.configDirty) this._syncConfigDraft();
         }
       } catch (e) { console.warn("save config failed", e); }
     },
@@ -299,6 +368,8 @@ function appRoot() {
       const next = { ...(this.config.pricing || {}) };
       next[model] = { ...(next[model] || {}), [key]: v };
       this.config.pricing = next;
+      // Keep draft pricing in lockstep so the dirty check doesn't trip
+      if (this.configDraft) this.configDraft.pricing = JSON.parse(JSON.stringify(next));
       await this.saveConfig({ pricing: next });
     },
     async saveNotificationConfig() {
@@ -340,6 +411,11 @@ function appRoot() {
       }
     },
     _onViewChange(v) {
+      if (v === "settings" && !this.configDirty) {
+        // Re-sync draft when entering Settings so it reflects any external
+        // changes that happened while we were away.
+        this._syncConfigDraft();
+      }
       if (v === "insights") {
         this.loadInsights();
         if (this._insightsTimer) clearInterval(this._insightsTimer);
@@ -506,7 +582,7 @@ function appRoot() {
       this.filesPidFilter = sess.pid;
       this.filesSearch = "";
       this.filesKindFilter = "All";
-      this.view = "files";
+      this.switchView("files");
     },
 
     // --- Tile mode ---
@@ -965,7 +1041,7 @@ function appRoot() {
 
     // F2 - jump to dashboard filtered by cwd via search bar
     jumpToProject(cwd) {
-      this.view = "dashboard";
+      this.switchView("dashboard");
       this.searchQuery = cwd;
       this._searchQueryDebounced = (cwd || "").toLowerCase();
     },
@@ -1014,11 +1090,15 @@ function appRoot() {
         return;
       }
       if (this._gPressed && Date.now() - this._gPressedAt < 1200) {
-        if (e.key === "i") { this.view = "insights"; this._gPressed = false; e.preventDefault(); return; }
-        if (e.key === "d") { this.view = "dashboard"; this._gPressed = false; e.preventDefault(); return; }
-        if (e.key === "f") { this.view = "files"; this._gPressed = false; e.preventDefault(); return; }
-        if (e.key === "h") { this.view = "history"; this.loadHistory(); this._gPressed = false; e.preventDefault(); return; }
-        if (e.key === "s") { this.view = "settings"; this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "i") { this.switchView("insights"); this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "d") { this.switchView("dashboard"); this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "f") { this.switchView("files"); this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "h") {
+          this.switchView("history");
+          if (this.view === "history") this.loadHistory();
+          this._gPressed = false; e.preventDefault(); return;
+        }
+        if (e.key === "s") { this.switchView("settings"); this._gPressed = false; e.preventDefault(); return; }
         this._gPressed = false;
       }
       // Dashboard-specific
