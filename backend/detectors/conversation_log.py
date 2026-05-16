@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.models import TokenUsage, ToolCallStats
@@ -96,7 +96,7 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
     tests inject a fixed value.
     """
     if now is None:
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
     pl = ParsedLog(conversation_id=path.stem, log_path=path)
     breakdown: dict[str, int] = {}
     last_tool_used: str | None = None

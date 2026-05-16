@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -54,7 +54,7 @@ class State:
     async def upsert_active(self, session: ClaudeSession) -> None:
         await self.connect()
         assert self._conn is not None
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         total = session.usage.total_tokens if session.usage else 0
         cost = session.usage.cost_estimate_usd if session.usage else None
         summary = session.model_dump_json()
@@ -86,7 +86,7 @@ class State:
     async def mark_ended(self, pid: int, started_at: datetime) -> None:
         await self.connect()
         assert self._conn is not None
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         await self._conn.execute(
             "UPDATE sessions SET ended_at=? WHERE pid=? AND started_at=? AND ended_at IS NULL",
             (now, pid, started_at.isoformat()),
@@ -96,7 +96,7 @@ class State:
     async def list_history(self, hours: int = 24) -> list[dict]:
         await self.connect()
         assert self._conn is not None
-        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         rows = await self._conn.execute_fetchall(
             """
             SELECT pid, started_at, ended_at, last_seen, cwd, model, total_tokens, cost_estimate, summary_json
@@ -119,7 +119,7 @@ class State:
     async def stats_today(self) -> dict:
         await self.connect()
         assert self._conn is not None
-        cutoff = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         row = await self._conn.execute_fetchall(
             """
             SELECT COUNT(*) AS sessions_today,
@@ -137,7 +137,7 @@ class State:
     async def prune(self, hours: int = 48) -> None:
         await self.connect()
         assert self._conn is not None
-        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         await self._conn.execute(
             "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
             (cutoff,),

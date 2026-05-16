@@ -4,7 +4,7 @@ import getpass
 import os
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import psutil
@@ -148,7 +148,7 @@ def scan_claude_processes() -> list[ProcInfo]:
                     pid=proc.pid,
                     ppid=proc.ppid(),
                     cwd=cwd,
-                    started_at=datetime.fromtimestamp(proc.info["create_time"], tz=UTC),
+                    started_at=datetime.fromtimestamp(proc.info["create_time"], tz=timezone.utc),
                     cpu_percent=float(cpu),
                     memory_mb=float(mem),
                     cmdline=cmdline,
