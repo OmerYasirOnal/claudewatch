@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -7,8 +7,38 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <link rel="stylesheet" href="/static/styles.css" />
+  <style>
+    /* Light theme overrides — applied when <html class="light"> */
+    html.light, html.light body { background: #fafafa !important; color: #18181b !important; }
+    html.light .bg-zinc-950, html.light .bg-zinc-950\/70 { background-color: #ffffff !important; }
+    html.light .bg-zinc-900, html.light .bg-zinc-900\/40, html.light .bg-zinc-900\/70 { background-color: #f4f4f5 !important; }
+    html.light .bg-zinc-800 { background-color: #e4e4e7 !important; }
+    html.light .text-zinc-100 { color: #18181b !important; }
+    html.light .text-zinc-300 { color: #27272a !important; }
+    html.light .text-zinc-400 { color: #52525b !important; }
+    html.light .text-zinc-500 { color: #71717a !important; }
+    html.light .border-zinc-800, html.light .border-zinc-900\/70 { border-color: #d4d4d8 !important; }
+    html.light .border-zinc-700 { border-color: #a1a1aa !important; }
+    html.light .hover\:border-zinc-700:hover { border-color: #71717a !important; }
+    html.light .bg-zinc-950\/70 { background-color: rgba(255,255,255,0.7) !important; }
+
+    /* Compact density overrides */
+    html.compact .cw-session-card { padding: 0.65rem !important; }
+    html.compact .cw-session-card header { margin-bottom: 0.4rem !important; }
+    html.compact .cw-session-card .text-sm { font-size: 0.78rem; }
+    html.compact .cw-stat-card { padding: 0.5rem 0.75rem !important; }
+    html.compact .cw-stat-card .text-2xl { font-size: 1.15rem !important; }
+
+    /* Subagent rows */
+    .cw-sub-row { display: flex; align-items: center; gap: .5rem; }
+    .cw-pulse-amber { animation: cw-pulse 1.4s ease-in-out infinite; }
+    @keyframes cw-pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+    /* j/k highlight */
+    .cw-selected { outline: 2px solid rgb(16 185 129 / 0.75); outline-offset: -2px; }
+  </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen" x-data="appRoot()" x-init="init()">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen dark" x-data="appRoot()" x-init="init()">
 
   <!-- Top bar -->
   <header class="border-b border-zinc-800 bg-zinc-950/70 backdrop-blur sticky top-0 z-20">
@@ -25,10 +55,22 @@
       </div>
       <nav class="flex items-center gap-1 ml-4 text-sm">
         <button class="px-3 py-1.5 rounded-md" :class="view==='dashboard' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='dashboard'">Dashboard</button>
+        <button class="px-3 py-1.5 rounded-md" :class="view==='insights' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='insights'; loadInsights()">Insights</button>
         <button class="px-3 py-1.5 rounded-md" :class="view==='history' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='history'; loadHistory()">History</button>
         <button class="px-3 py-1.5 rounded-md" :class="view==='settings' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='settings'">Settings</button>
       </nav>
       <div class="flex-1"></div>
+      <div class="relative">
+        <input id="global-search" type="text"
+               :value="searchQuery"
+               @input="onSearchInput($event.target.value)"
+               placeholder="Search sessions… (press /)"
+               class="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-sm w-64 focus:outline-none focus:border-emerald-500" />
+        <template x-if="searchQuery">
+          <button @click="searchQuery=''; _searchQueryDebounced=''"
+                  class="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white text-xs">×</button>
+        </template>
+      </div>
       <button @click="showNewModal=true" class="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium">+ New session</button>
     </div>
   </header>
@@ -65,23 +107,23 @@
 
       <!-- Stats row -->
       <section class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-        <div x-show="cardVisibility.active" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.active" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Active</div>
           <div class="text-2xl font-semibold mt-1" x-text="stats.active ?? 0"></div>
         </div>
-        <div x-show="cardVisibility.sessions_today" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.sessions_today" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Today sessions</div>
           <div class="text-2xl font-semibold mt-1" x-text="stats.sessions_today ?? 0"></div>
         </div>
-        <div x-show="cardVisibility.active_tokens" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.active_tokens" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Tokens (active)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtNum(stats.active_tokens ?? 0)"></div>
         </div>
-        <div x-show="cardVisibility.active_cost" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.active_cost" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Cost (active, est.)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtMoney(stats.active_cost ?? 0)"></div>
         </div>
-        <div x-show="cardVisibility.cost_today" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.cost_today" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Cost (24h, est.)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtMoney(stats.cost_today ?? 0)"></div>
         </div>
@@ -96,12 +138,16 @@
             <span x-text="f"></span>
           </button>
         </template>
+        <div class="flex-1"></div>
+        <span class="text-[11px] text-zinc-500">press <kbd class="px-1 py-0.5 rounded bg-zinc-800 border border-zinc-700">?</kbd> for shortcuts</span>
       </div>
 
       <!-- Session cards -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <template x-for="sess in visibleSessions()" :key="sess.pid">
-          <article class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 hover:border-zinc-700 transition">
+        <template x-for="(sess, sessIdx) in visibleSessions()" :key="sess.pid">
+          <article class="cw-session-card rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 hover:border-zinc-700 transition"
+                   :data-session-idx="sessIdx"
+                   :class="sessIdx === selectedPidIdx ? 'cw-selected' : ''">
             <header class="flex items-start justify-between gap-3 mb-3">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="size-2 rounded-full"
@@ -118,6 +164,16 @@
                 <span x-show="sess.thinking_enabled" class="text-xs text-violet-300/90 ml-1">🧠</span>
               </div>
               <div class="flex items-center gap-1">
+                <button @click="toggleBookmark(sess)" :title="isBookmarked(sess) ? 'Remove bookmark' : 'Bookmark'"
+                        class="text-sm leading-none"
+                        :class="isBookmarked(sess) ? 'text-amber-300' : 'text-zinc-500 hover:text-amber-300'">
+                  <span x-text="isBookmarked(sess) ? '★' : '☆'"></span>
+                </button>
+                <button @click="openNoteEditor(sess)" :title="sessionNote(sess) ? 'Edit note' : 'Add note'"
+                        class="text-xs"
+                        :class="sessionNote(sess) ? 'text-emerald-300' : 'text-zinc-500 hover:text-emerald-300'">📝</button>
+                <button @click="exportSession(sess)" title="Export session JSON"
+                        class="text-xs text-zinc-500 hover:text-emerald-300">⬇</button>
                 <template x-if="sess.permission_mode === 'dangerously-skip' || sess.permission_mode === 'bypassPermissions'">
                   <span class="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-700/40">skip-perm</span>
                 </template>
@@ -223,6 +279,41 @@
                   </div>
                 </div>
               </template>
+
+              <!-- F1 Subagents -->
+              <template x-if="sess.subagents && sess.subagents.length">
+                <div class="text-xs">
+                  <button @click="toggleSubagents(sess)"
+                          class="text-zinc-400 hover:text-emerald-300 flex items-center gap-1.5">
+                    <span x-text="isSubagentsExpanded(sess) ? '▼' : '▶'"></span>
+                    <span>
+                      <span x-text="(sess.subagents || []).length"></span> subagents
+                      <template x-if="subagentSummary(sess) && subagentSummary(sess).text">
+                        <span class="text-zinc-500">(<span x-text="subagentSummary(sess).text"></span>)</span>
+                      </template>
+                    </span>
+                  </button>
+                  <div x-show="isSubagentsExpanded(sess)" class="mt-2 space-y-1.5 pl-4 border-l border-zinc-800">
+                    <template x-for="sa in (sess.subagents || [])" :key="sa.tool_use_id">
+                      <div class="cw-sub-row text-[11px] text-zinc-300">
+                        <span class="size-1.5 rounded-full shrink-0"
+                              :class="{
+                                'bg-emerald-400': sa.status==='completed',
+                                'bg-amber-400 cw-pulse-amber': sa.status==='pending',
+                                'bg-rose-400': sa.status==='failed' || sa.status==='error',
+                                'bg-zinc-500': !['completed','pending','failed','error'].includes(sa.status),
+                              }"></span>
+                        <span class="truncate flex-1" :title="sa.result_preview || sa.description || ''"
+                              x-text="sa.description || '—'"></span>
+                        <template x-if="sa.subagent_type">
+                          <span class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-mono shrink-0" x-text="sa.subagent_type"></span>
+                        </template>
+                        <span class="font-mono text-[10px] text-zinc-500 shrink-0" x-text="subagentDuration(sa)"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
             </div>
 
             <footer class="flex items-center gap-2 mt-4 pt-3 border-t border-zinc-800">
@@ -248,6 +339,58 @@
             No active Claude sessions detected. Start one with <code class="text-emerald-400">claude</code> in any terminal.
           </div>
         </template>
+      </div>
+    </div>
+
+    <!-- Insights view -->
+    <div x-show="view==='insights'" class="space-y-8">
+      <div>
+        <h2 class="text-xl font-semibold mb-1">Insights</h2>
+        <p class="text-sm text-zinc-400">Live trends across your projects. Refreshes every 30s while open.</p>
+      </div>
+
+      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <h3 class="text-sm font-medium mb-3 text-zinc-300">24h cost trend</h3>
+        <canvas id="insights-bar" class="w-full" style="height: 180px;"></canvas>
+      </section>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <section class="md:col-span-2 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+          <h3 class="text-sm font-medium mb-3 text-zinc-300">Projects (24h)</h3>
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="text-zinc-400 uppercase tracking-wide border-b border-zinc-800">
+                <th class="text-left py-2 px-2">cwd</th>
+                <th class="text-right py-2 px-2">Active</th>
+                <th class="text-right py-2 px-2">Sessions</th>
+                <th class="text-right py-2 px-2">Tokens</th>
+                <th class="text-right py-2 px-2">Cost</th>
+                <th class="text-left py-2 px-2">Last active</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="p in [...insightsData.projects].sort((a,b)=>(b.total_cost_24h||0)-(a.total_cost_24h||0))" :key="p.cwd">
+                <tr class="border-b border-zinc-900/70 hover:bg-zinc-900/60 cursor-pointer"
+                    @click="jumpToProject(p.cwd)">
+                  <td class="py-1.5 px-2 font-mono truncate max-w-xs" :title="p.cwd" x-text="p.cwd"></td>
+                  <td class="py-1.5 px-2 text-right" x-text="p.active_sessions ?? 0"></td>
+                  <td class="py-1.5 px-2 text-right" x-text="p.sessions_24h ?? 0"></td>
+                  <td class="py-1.5 px-2 text-right" x-text="fmtNum(p.total_tokens_24h ?? 0)"></td>
+                  <td class="py-1.5 px-2 text-right text-emerald-300" x-text="fmtMoney(p.total_cost_24h ?? 0)"></td>
+                  <td class="py-1.5 px-2 text-zinc-400" x-text="relTime(p.last_active_at)"></td>
+                </tr>
+              </template>
+              <template x-if="!insightsData.projects.length">
+                <tr><td colspan="6" class="text-center py-8 text-zinc-500">No project data yet.</td></tr>
+              </template>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+          <h3 class="text-sm font-medium mb-3 text-zinc-300">Model usage (active)</h3>
+          <canvas id="insights-donut" class="w-full" style="height: 200px;"></canvas>
+        </section>
       </div>
     </div>
 
@@ -310,6 +453,50 @@
         </label>
       </div>
 
+      <!-- F7 Appearance -->
+      <section>
+        <h3 class="text-lg font-medium mb-2">Appearance</h3>
+        <p class="text-sm text-zinc-400 mb-3">Saved in this browser.</p>
+        <div class="flex items-center gap-3 text-sm">
+          <label class="flex items-center gap-2"><input type="radio" value="dark" x-model="appearance" @change="saveAppearance()"> Dark</label>
+          <label class="flex items-center gap-2"><input type="radio" value="light" x-model="appearance" @change="saveAppearance()"> Light</label>
+        </div>
+      </section>
+
+      <!-- F8 Density -->
+      <section>
+        <h3 class="text-lg font-medium mb-2">Dashboard layout</h3>
+        <div class="flex items-center gap-3 text-sm">
+          <label class="flex items-center gap-2"><input type="radio" value="comfortable" x-model="density" @change="saveDensity()"> Comfortable</label>
+          <label class="flex items-center gap-2"><input type="radio" value="compact" x-model="density" @change="saveDensity()"> Compact</label>
+        </div>
+      </section>
+
+      <!-- F9 Notifications -->
+      <section>
+        <h3 class="text-lg font-medium mb-2">Notifications</h3>
+        <div class="space-y-2 text-sm">
+          <label class="flex items-center justify-between gap-3">
+            <span>Enable notifications</span>
+            <input type="checkbox" x-model="config.notifications.enabled" @change="saveNotificationConfig()" />
+          </label>
+          <label class="flex items-center justify-between gap-3">
+            <span>On session end</span>
+            <input type="checkbox" x-model="config.notifications.on_session_end" @change="saveNotificationConfig()" />
+          </label>
+          <label class="flex items-center justify-between gap-3">
+            <span>On high cost</span>
+            <input type="checkbox" x-model="config.notifications.on_high_cost" @change="saveNotificationConfig()" />
+          </label>
+          <label class="flex items-center justify-between gap-3">
+            <span>High-cost threshold (USD)</span>
+            <input type="number" step="0.5" min="0" class="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 w-24 text-right"
+                   x-model.number="config.notifications.cost_threshold_usd"
+                   @change="saveNotificationConfig()" />
+          </label>
+        </div>
+      </section>
+
       <section class="mb-8">
         <h2 class="text-lg font-semibold mb-3">Dashboard cards</h2>
         <p class="text-sm text-zinc-400 mb-4">Toggle which summary cards appear at the top of the dashboard. Preferences are saved in this browser.</p>
@@ -335,6 +522,12 @@
             <span class="text-sm">24h cost ($)</span>
           </label>
         </div>
+      </section>
+
+      <!-- F10 Export -->
+      <section>
+        <h3 class="text-lg font-medium mb-2">Export</h3>
+        <button @click="exportAll()" class="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-sm">Export all sessions (CSV, 7d)</button>
       </section>
 
       <div>
@@ -403,6 +596,55 @@
         <div class="flex justify-end gap-2 pt-2">
           <button @click="showNewModal=false" class="px-3 py-1.5 rounded text-sm text-zinc-300 hover:text-white">Cancel</button>
           <button @click="submitNew()" class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm">Open</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- F6 Notes modal -->
+  <div x-show="notesEditPid !== null" x-transition.opacity x-cloak
+       class="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
+       @click.self="closeNoteEditor()">
+    <div class="bg-zinc-900 border border-zinc-800 rounded-xl max-w-md w-full">
+      <header class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+        <h3 class="text-sm font-semibold">Note · PID <span x-text="notesEditPid"></span></h3>
+        <button @click="closeNoteEditor()" class="text-zinc-400 hover:text-white">✕</button>
+      </header>
+      <div class="p-5 space-y-3">
+        <textarea x-model="notesEditText" rows="6"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-sm"
+                  placeholder="Notes for this session (saved locally)…"></textarea>
+        <div class="flex justify-end gap-2">
+          <button @click="closeNoteEditor()" class="px-3 py-1.5 rounded text-sm text-zinc-300 hover:text-white">Cancel</button>
+          <button @click="saveNoteEditor()" class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- F4 Shortcuts cheat-sheet -->
+  <div x-show="showShortcuts" x-transition.opacity x-cloak
+       class="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
+       @click.self="showShortcuts=false">
+    <div class="bg-zinc-900 border border-zinc-800 rounded-xl max-w-md w-full">
+      <header class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+        <h3 class="text-sm font-semibold">Keyboard shortcuts</h3>
+        <button @click="showShortcuts=false" class="text-zinc-400 hover:text-white">✕</button>
+      </header>
+      <div class="p-5 text-sm space-y-2">
+        <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-zinc-300">
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">j</kbd><span>Next session</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">k</kbd><span>Previous session</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">Enter</kbd><span>Open detail of highlighted</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">f</kbd><span>Focus highlighted session</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">h</kbd><span>Halt highlighted session</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">/</kbd><span>Focus search</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g d</kbd><span>Dashboard</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g i</kbd><span>Insights</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g h</kbd><span>History</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g s</kbd><span>Settings</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">?</kbd><span>Show this cheat-sheet</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">Esc</kbd><span>Close modal</span>
         </div>
       </div>
     </div>
