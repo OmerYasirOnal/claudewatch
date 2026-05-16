@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -6,38 +7,164 @@ struct SettingsView: View {
     @ObservedObject private var notifMgr = NotificationManager.shared
 
     var body: some View {
-        TabView {
-            GeneralTab(vm: vm)
-                .tabItem { Label("General", systemImage: "gearshape") }
-            NotificationsTab(vm: vm, appVM: appVM, notifMgr: notifMgr)
-                .tabItem { Label("Notifications", systemImage: "bell") }
-            EditorTab(vm: vm)
-                .tabItem { Label("Editor", systemImage: "doc.text") }
-            RemoteControlTab(vm: vm)
-                .tabItem { Label("Remote Control", systemImage: "paperplane") }
-            AboutTab()
-                .tabItem { Label("About", systemImage: "info.circle") }
+        VStack(spacing: 0) {
+            TabView {
+                GeneralTab(vm: vm)
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                NotificationsTab(vm: vm, appVM: appVM, notifMgr: notifMgr)
+                    .tabItem { Label("Notifications", systemImage: "bell") }
+                EditorTab(vm: vm)
+                    .tabItem { Label("Editor", systemImage: "doc.text") }
+                RemoteControlTab(vm: vm)
+                    .tabItem { Label("Remote Control", systemImage: "paperplane") }
+                AboutTab()
+                    .tabItem { Label("About", systemImage: "info.circle") }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            SettingsFooter(vm: vm)
         }
-        .frame(width: 520, height: 440)
+        .frame(width: 520, height: 480)
         .task {
             await vm.load()
             await notifMgr.refreshAuthorizationStatus()
         }
-        .overlay(alignment: .bottom) {
-            if let err = vm.lastError {
+        // Hook into the Settings NSWindow's close so we can prompt before
+        // discarding unsaved edits. SwiftUI doesn't expose a windowShouldClose
+        // delegate, so we attach an NSWindowDelegate via a background helper.
+        .background(WindowCloseGuard(isDirty: { vm.isDirty }, onDiscard: { vm.discard() }))
+    }
+}
+
+// MARK: - Footer
+
+/// Sticky bar pinned to the bottom of the Settings window. Shows the unsaved
+/// badge, Discard + Save buttons, and a status line (last-saved time or error).
+private struct SettingsFooter: View {
+    @ObservedObject var vm: SettingsViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if vm.isDirty {
+                HStack(spacing: 4) {
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: 6))
+                        .foregroundStyle(.orange)
+                    Text("Unsaved changes")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } else if let err = vm.lastError {
                 Text(err)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .padding(8)
-                    .background(.red.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .padding(8)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
             } else if let saved = vm.lastSavedAt {
-                Text("Saved \(saved.formatted(date: .omitted, time: .standard))")
+                Text("Saved at \(saved.formatted(date: .omitted, time: .standard))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .padding(4)
+            } else if vm.isLoading {
+                Text("Loading…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+
+            Spacer()
+
+            Button("Discard") { vm.discard() }
+                .disabled(!vm.isDirty || vm.isSaving)
+            Button("Save") { Task { await vm.save() } }
+                .keyboardShortcut(.return)
+                .buttonStyle(.borderedProminent)
+                .disabled(!vm.isDirty || vm.isSaving)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+}
+
+// MARK: - Window close guard
+
+/// Bridges an `NSWindowDelegate` into SwiftUI to intercept the close button.
+/// If the user has unsaved edits we put up a confirm/cancel sheet; on confirm
+/// we discard the draft and let the window close. Pure UI plumbing — no
+/// network calls from here, so it stays test-free.
+private struct WindowCloseGuard: NSViewRepresentable {
+    let isDirty: () -> Bool
+    let onDiscard: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isDirty: isDirty, onDiscard: onDiscard)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        // We don't know which window we're in yet; defer until layout.
+        DispatchQueue.main.async { [weak v] in
+            guard let window = v?.window else { return }
+            context.coordinator.attach(to: window)
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // Re-attach in case the window reference changed (unlikely for the
+        // Settings scene, but harmless).
+        if let window = nsView.window, context.coordinator.window !== window {
+            context.coordinator.attach(to: window)
+        }
+        context.coordinator.isDirty = isDirty
+        context.coordinator.onDiscard = onDiscard
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSWindowDelegate {
+        var isDirty: () -> Bool
+        var onDiscard: () -> Void
+        weak var window: NSWindow?
+        // Chain to whatever delegate was already on the window (SwiftUI may
+        // install one for cursor/key tracking) so we don't break it.
+        weak var previousDelegate: NSWindowDelegate?
+
+        init(isDirty: @escaping () -> Bool, onDiscard: @escaping () -> Void) {
+            self.isDirty = isDirty
+            self.onDiscard = onDiscard
+        }
+
+        func attach(to window: NSWindow) {
+            guard self.window !== window else { return }
+            self.previousDelegate = window.delegate
+            self.window = window
+            window.delegate = self
+        }
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            if !isDirty() {
+                _ = previousDelegate?.windowShouldClose?(sender)
+                return true
+            }
+            let alert = NSAlert()
+            alert.messageText = "Discard unsaved changes?"
+            alert.informativeText = "Your edits to Settings haven't been saved. Closing this window will discard them."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Discard Changes")
+            alert.addButton(withTitle: "Cancel")
+            let response = alert.runModal()
+            switch response {
+            case .alertFirstButtonReturn:
+                onDiscard()
+                return true
+            default:
+                return false
+            }
+        }
+
+        // Forward the rest of the delegate surface we care about so we don't
+        // accidentally swallow SwiftUI's bookkeeping.
+        func windowWillClose(_ notification: Notification) {
+            previousDelegate?.windowWillClose?(notification)
         }
     }
 }
@@ -50,7 +177,7 @@ private struct GeneralTab: View {
     var body: some View {
         Form {
             Section("Plan") {
-                Picker("Anthropic plan", selection: $vm.config.plan) {
+                Picker("Anthropic plan", selection: $vm.draftConfig.plan) {
                     Text(verbatim: "API (pay per token — show $)").tag("api")
                     Text(verbatim: "Pro ($20/mo flat — hide $)").tag("pro")
                     Text(verbatim: "Max 5× (hide $)").tag("max")
@@ -59,7 +186,6 @@ private struct GeneralTab: View {
                     Text(verbatim: "Free (hide $)").tag("free")
                 }
                 .pickerStyle(.menu)
-                .onChange(of: vm.config.plan) { Task { await vm.save() } }
                 Text("For Max/Pro/Team plans, dollar costs are hidden everywhere since you pay a flat monthly fee. Token totals stay visible.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -67,31 +193,26 @@ private struct GeneralTab: View {
             Section("Scheduler") {
                 LabeledContent("Process scan interval") {
                     HStack {
-                        Slider(value: $vm.config.processScanIntervalSeconds, in: 0.5...10, step: 0.5)
-                        Text("\(String(format: "%.1f", vm.config.processScanIntervalSeconds))s")
+                        Slider(value: $vm.draftConfig.processScanIntervalSeconds, in: 0.5...10, step: 0.5)
+                        Text("\(String(format: "%.1f", vm.draftConfig.processScanIntervalSeconds))s")
                             .monospacedDigit()
                             .frame(width: 44, alignment: .trailing)
                     }
                 }
                 LabeledContent("iTerm refresh interval") {
                     HStack {
-                        Slider(value: $vm.config.itermRefreshIntervalSeconds, in: 1...30, step: 1)
-                        Text("\(Int(vm.config.itermRefreshIntervalSeconds))s")
+                        Slider(value: $vm.draftConfig.itermRefreshIntervalSeconds, in: 1...30, step: 1)
+                        Text("\(Int(vm.draftConfig.itermRefreshIntervalSeconds))s")
                             .monospacedDigit()
                             .frame(width: 44, alignment: .trailing)
                     }
                 }
             }
             Section("Privacy") {
-                Toggle("Read-only mode (no focus/halt/new-session)", isOn: $vm.config.readOnly)
-                Toggle("Privacy mode (redact log text in dashboard)", isOn: $vm.config.privacyMode)
-                Toggle("Allow log text in dashboard (override privacy_mode for /log-tail)", isOn: $vm.config.showLogText)
-                    .disabled(vm.config.privacyMode)
-            }
-            HStack {
-                Spacer()
-                Button("Save") { Task { await vm.save() } }
-                    .keyboardShortcut(.return)
+                Toggle("Read-only mode (no focus/halt/new-session)", isOn: $vm.draftConfig.readOnly)
+                Toggle("Privacy mode (redact log text in dashboard)", isOn: $vm.draftConfig.privacyMode)
+                Toggle("Allow log text in dashboard (override privacy_mode for /log-tail)", isOn: $vm.draftConfig.showLogText)
+                    .disabled(vm.draftConfig.privacyMode)
             }
         }
         .formStyle(.grouped)
@@ -142,30 +263,25 @@ private struct NotificationsTab: View {
                 }
             }
             Section("Master") {
-                Toggle("Enable macOS notifications", isOn: $vm.config.notifications.enabled)
-                if appVM.notificationSource == .native && vm.config.notifications.enabled {
+                Toggle("Enable macOS notifications", isOn: $vm.draftConfig.notifications.enabled)
+                if appVM.notificationSource == .native && vm.draftConfig.notifications.enabled {
                     Text("Note: in Native mode the backend's master switch is held off by the tray. The triggers below still apply to the native notifications.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             Section("Triggers") {
-                Toggle("When a Claude session ends", isOn: $vm.config.notifications.onSessionEnd)
-                Toggle("When a session crosses the cost threshold", isOn: $vm.config.notifications.onHighCost)
+                Toggle("When a Claude session ends", isOn: $vm.draftConfig.notifications.onSessionEnd)
+                Toggle("When a session crosses the cost threshold", isOn: $vm.draftConfig.notifications.onHighCost)
                 LabeledContent("Cost threshold") {
                     HStack {
-                        TextField("", value: $vm.config.notifications.costThresholdUsd,
+                        TextField("", value: $vm.draftConfig.notifications.costThresholdUsd,
                                   format: .currency(code: "USD"))
                             .frame(width: 110)
                             .multilineTextAlignment(.trailing)
-                            .disabled(!vm.config.notifications.onHighCost)
+                            .disabled(!vm.draftConfig.notifications.onHighCost)
                     }
                 }
-            }
-            HStack {
-                Spacer()
-                Button("Save") { Task { await vm.save() } }
-                    .keyboardShortcut(.return)
             }
         }
         .formStyle(.grouped)
@@ -181,18 +297,13 @@ private struct EditorTab: View {
     var body: some View {
         Form {
             Section("Open in editor") {
-                Toggle("Enable \"Open in editor\" button", isOn: $vm.config.editor.enabled)
-                TextField("Command", text: $vm.config.editor.command,
+                Toggle("Enable \"Open in editor\" button", isOn: $vm.draftConfig.editor.enabled)
+                TextField("Command", text: $vm.draftConfig.editor.command,
                           prompt: Text("code"))
-                    .disabled(!vm.config.editor.enabled)
+                    .disabled(!vm.draftConfig.editor.enabled)
                 Text("Typical values: `code` (VSCode CLI), `cursor`, `subl` (Sublime), `open -t` (default text editor). The command receives the absolute file path as a single argument.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-            HStack {
-                Spacer()
-                Button("Save") { Task { await vm.save() } }
-                    .keyboardShortcut(.return)
             }
         }
         .formStyle(.grouped)
@@ -208,7 +319,7 @@ private struct RemoteControlTab: View {
     var body: some View {
         Form {
             Section("Remote control") {
-                Toggle("Allow sending messages to live Claude sessions", isOn: $vm.config.remoteControl.enabled)
+                Toggle("Allow sending messages to live Claude sessions", isOn: $vm.draftConfig.remoteControl.enabled)
                 Text("When enabled, the dashboard chat panel forwards text to the corresponding iTerm session as if you typed it. Off by default. Off also blocks the POST /api/sessions/{pid}/send-text endpoint from accepting writes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -224,11 +335,6 @@ private struct RemoteControlTab: View {
                 Text("Cmd+Return sends · Return inserts a newline (so multi-line prompts don't fire by accident).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-            HStack {
-                Spacer()
-                Button("Save") { Task { await vm.save() } }
-                    .keyboardShortcut(.return)
             }
         }
         .formStyle(.grouped)
