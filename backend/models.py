@@ -57,8 +57,11 @@ class ClaudeSession(BaseModel):
     status: SessionStatus = "idle"
 
     location_type: LocationType = "headless"
-    iterm_window_id: int | None = None
-    iterm_tab_id: int | None = None
+    # iTerm 3.5+ returns UUID-like string IDs (e.g. "pty-...UUID..."), so we
+    # store window/tab IDs as strings (#22). `iterm_tab_index` stays int — it
+    # is a separate concept used by the AppleScript-by-tty fallback path.
+    iterm_window_id: str | None = None
+    iterm_tab_id: str | None = None
     iterm_tab_index: int | None = None
     iterm_session_id: str | None = None
     iterm_tab_title: str | None = None

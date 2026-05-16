@@ -138,7 +138,9 @@ async def test_build_sessions_consumes_iterm_loc_map_arg(isolated_log_dir):
     procs = [_proc(pid=5555, cwd=cwd)]
     state = LinkerState()
     state.log_dir = log_dir
-    iterm_map = {5555: ItermLocation(window_id=1, tab_id=2, session_id="sess-abc", tab_title="my tab")}
+    iterm_map = {
+        5555: ItermLocation(window_id="pty-WIN-1", tab_id="2", session_id="sess-abc", tab_title="my tab")
+    }
 
     with (
         patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
@@ -148,8 +150,8 @@ async def test_build_sessions_consumes_iterm_loc_map_arg(isolated_log_dir):
 
     s = sessions[0]
     assert s.location_type == "iterm"
-    assert s.iterm_window_id == 1
-    assert s.iterm_tab_id == 2
+    assert s.iterm_window_id == "pty-WIN-1"
+    assert s.iterm_tab_id == "2"
     assert s.iterm_session_id == "sess-abc"
     assert s.iterm_tab_title == "my tab"
 
@@ -172,7 +174,9 @@ async def test_build_sessions_consumes_iterm_tty_map_arg(isolated_log_dir):
 
     s = sessions[0]
     assert s.location_type == "iterm"
-    assert s.iterm_window_id == 7
+    # Model field is str | None now (#22). AppleScript fallback supplies int from
+    # `id of window` AppleScript output; linker stringifies on the way in.
+    assert s.iterm_window_id == "7"
     assert s.iterm_tab_index == 3
     assert s.iterm_tty == "/dev/ttys000"
     assert s.iterm_session_id == "u-1"

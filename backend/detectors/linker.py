@@ -171,7 +171,10 @@ async def build_sessions(
 
         def _apply_iterm_tty(iloc: Any) -> None:
             nonlocal iterm_window_id, iterm_tab_index, iterm_session_id, iterm_tab_title, iterm_tty
-            iterm_window_id = iloc.window_id
+            # ItermTtyLocation.window_id is int (from `id of window` AppleScript
+            # output); the SessionStatus model field is str | None (#22), so
+            # stringify on the way in.
+            iterm_window_id = str(iloc.window_id) if iloc.window_id is not None else None
             iterm_tab_index = iloc.tab_index
             iterm_session_id = iloc.unique_id
             iterm_tab_title = iloc.name
