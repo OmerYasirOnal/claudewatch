@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 from backend.config import DEFAULT_CONFIG
 from backend.models import ClaudeSession, TokenUsage
-from backend.server import AppState, _emit_diffs, _maybe_prune
+from backend.server import AppState, _emit_diffs, _maybe_prune, _session_hash
 
 
 def _mk_sess(pid: int, input_tokens: int = 0) -> ClaudeSession:
@@ -141,3 +141,77 @@ async def test_maybe_prune_no_state_is_noop():
     s.last_prune_at = 0.0
     # Should not raise.
     await _maybe_prune(s)
+
+
+# --- #45: hash must exclude monotonic / derived fields ---------------------
+
+
+def test_session_hash_ignores_cpu_percent():
+    """#45: cpu_percent fluctuates every tick; including it in the hash
+    defeats the diff optimization entirely."""
+    sess = _mk_sess(pid=1)
+    base_hash = _session_hash(sess)
+    sess.cpu_percent = 99.9
+    assert _session_hash(sess) == base_hash
+
+
+def test_session_hash_ignores_memory_mb():
+    sess = _mk_sess(pid=1)
+    base_hash = _session_hash(sess)
+    sess.memory_mb = 9999.0
+    assert _session_hash(sess) == base_hash
+
+
+def test_session_hash_ignores_duration_seconds():
+    sess = _mk_sess(pid=1)
+    base_hash = _session_hash(sess)
+    sess.duration_seconds = 999999
+    assert _session_hash(sess) == base_hash
+
+
+def test_session_hash_ignores_last_activity_at():
+    sess = _mk_sess(pid=1)
+    base_hash = _session_hash(sess)
+    sess.last_activity_at = datetime(2099, 1, 1, 0, 0, 0, tzinfo=UTC)
+    assert _session_hash(sess) == base_hash
+
+
+def test_session_hash_ignores_current_task_elapsed_seconds():
+    sess = _mk_sess(pid=1)
+    base_hash = _session_hash(sess)
+    sess.current_task_elapsed_seconds = 9999
+    assert _session_hash(sess) == base_hash
+
+
+def test_session_hash_changes_on_model_field():
+    """Sanity check: meaningful changes still flip the hash."""
+    sess = _mk_sess(pid=1)
+    base_hash = _session_hash(sess)
+    sess.model = "claude-opus-4-7"
+    assert _session_hash(sess) != base_hash
+
+
+def test_session_hash_changes_on_token_usage():
+    sess = _mk_sess(pid=1, input_tokens=100)
+    sess2 = _mk_sess(pid=1, input_tokens=200)
+    assert _session_hash(sess) != _session_hash(sess2)
+
+
+async def test_emit_diffs_skips_update_when_only_volatile_fields_change():
+    """End-to-end: tick where only cpu/memory/duration change must NOT emit
+    session.updated. This is the bug #45 was about."""
+    s = AppState(config=dict(DEFAULT_CONFIG))
+    events = _collect_events(s)
+
+    sess1 = _mk_sess(pid=1)
+    await _emit_diffs(s, [sess1])
+    events.clear()
+
+    sess2 = _mk_sess(pid=1)
+    sess2.cpu_percent = 88.0
+    sess2.memory_mb = 4096.0
+    sess2.duration_seconds = sess1.duration_seconds + 60
+    sess2.last_activity_at = datetime(2030, 1, 1, tzinfo=UTC)
+    sess2.current_task_elapsed_seconds = 42
+    await _emit_diffs(s, [sess2])
+    assert events == []

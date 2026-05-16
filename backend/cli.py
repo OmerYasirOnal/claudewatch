@@ -106,6 +106,12 @@ def start(daemon: bool = typer.Option(False, "--daemon", "-d", help="Detach to b
                     str(port),
                     "--log-level",
                     "info",
+                    # Issue #27 belt-and-suspenders: if an SSE generator still
+                    # hasn't noticed the shutdown_event within 3s, uvicorn
+                    # forcibly closes the connection so `claudewatch stop`
+                    # never hangs on a connected browser.
+                    "--timeout-graceful-shutdown",
+                    "3",
                 ],
                 stdout=logf,
                 stderr=logf,
