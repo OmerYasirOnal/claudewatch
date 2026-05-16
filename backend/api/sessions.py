@@ -136,27 +136,56 @@ async def stream_log_tail(pid: int, request: Request):
     show_text = bool(s.config.get("show_log_text", False))
     log_path = Path(sess.conversation_log_path)
 
+    def _read_snapshot() -> tuple[list[dict], int] | None:
+        """Read the tail of the log file for the initial snapshot.
+
+        Mirrors the bounded MAX_LOG_TAIL_BYTES seek-from-end pattern used by
+        /log-tail (#87) so a multi-GB conversation log can't OOM the daemon.
+        Also returns the end-of-file position so the poll loop knows where
+        to resume from.
+        """
+        try:
+            size = log_path.stat().st_size
+            with open(log_path, "rb") as f:
+                if size > MAX_LOG_TAIL_BYTES:
+                    f.seek(-MAX_LOG_TAIL_BYTES, 2)
+                    f.readline()  # discard partial line
+                raw = f.read()
+                end_pos = f.tell()
+        except OSError:
+            return None
+        text = raw.decode("utf-8", errors="replace")
+        entries: list[dict] = []
+        for line in text.splitlines()[-20:]:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return entries, end_pos
+
+    def _read_new(start: int) -> tuple[bytes, int] | None:
+        """Read bytes appended since the last poll, returning (chunk, new_pos)."""
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(start)
+                chunk = f.read()
+                new_pos = f.tell()
+        except OSError:
+            return None
+        return chunk, new_pos
+
     async def gen():
         # --- initial snapshot --------------------------------------------------
-        try:
-            with open(log_path, encoding="utf-8") as f:
-                lines = f.readlines()
-            entries: list[dict] = []
-            for line in lines[-20:]:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-            if not show_text:
-                _redact_entries(entries)
-            yield f"event: snapshot\ndata: {json.dumps({'entries': entries})}\n\n"
-            # Mark our position so the poll loop only emits genuinely new lines.
-            with open(log_path, "rb") as f:
-                f.seek(0, 2)
-                pos = f.tell()
-        except OSError:
+        # Run the file read off the event loop and cap it at MAX_LOG_TAIL_BYTES
+        # so a huge JSONL doesn't block the loop or OOM the process (#87).
+        snap = await asyncio.to_thread(_read_snapshot)
+        if snap is None:
             yield 'event: error\ndata: {"error":"cannot read log"}\n\n'
             return
+        entries, pos = snap
+        if not show_text:
+            _redact_entries(entries)
+        yield f"event: snapshot\ndata: {json.dumps({'entries': entries})}\n\n"
 
         # --- poll loop ---------------------------------------------------------
         shutdown_event = getattr(s, "shutdown_event", None)
@@ -166,13 +195,12 @@ async def stream_log_tail(pid: int, request: Request):
             if shutdown_event is not None and shutdown_event.is_set():
                 break
             await asyncio.sleep(_LOG_STREAM_POLL_SECONDS)
-            try:
-                with open(log_path, "rb") as f:
-                    f.seek(pos)
-                    chunk = f.read()
-                    pos = f.tell()
-            except OSError:
+            # Even the incremental poll touches disk — keep it off the loop
+            # so a stalled fs doesn't freeze the whole daemon (#87).
+            result = await asyncio.to_thread(_read_new, pos)
+            if result is None:
                 continue
+            chunk, pos = result
             if not chunk:
                 continue
             new_lines = chunk.decode("utf-8", errors="replace").splitlines()

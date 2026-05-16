@@ -654,6 +654,105 @@ def test_log_stream_initial_snapshot_event(populated_app, tmp_path):
     assert data["entries"][0]["message"]["content"][0]["text"] == "hi"
 
 
+def test_log_stream_snapshot_bounded_to_5mb(populated_app, tmp_path):
+    """#87: a >6 MB JSONL must NOT be read in its entirety for the snapshot;
+    the snapshot is capped at MAX_LOG_TAIL_BYTES (5 MB) seek-from-end, so
+    older entries beyond the cap are excluded from the initial event."""
+    import asyncio
+    import json as _json
+    from unittest.mock import AsyncMock, MagicMock
+
+    from backend.api.sessions import MAX_LOG_TAIL_BYTES, stream_log_tail
+
+    client, fastapi_app, sess = populated_app  # noqa: F841 — fixture sets app state
+    fastapi_app.state.s.config["show_log_text"] = True
+
+    log = tmp_path / "huge.jsonl"
+    # Build > 6 MB of JSONL. Each line is ~1 KB of padding so we cross the cap
+    # without spending memory on the cumulative content.
+    line_template = '{{"type":"user","i":{i},"pad":"{pad}"}}\n'
+    pad = "x" * 1000
+    target_bytes = MAX_LOG_TAIL_BYTES + 1 * 1024 * 1024  # 6 MB total
+    with open(log, "w") as f:
+        i = 0
+        written = 0
+        while written < target_bytes:
+            row = line_template.format(i=i, pad=pad)
+            f.write(row)
+            written += len(row)
+            i += 1
+        last_i = i - 1
+
+    assert log.stat().st_size > MAX_LOG_TAIL_BYTES
+    sess.conversation_log_path = str(log)
+
+    fake_req = MagicMock()
+    fake_req.app = fastapi_app
+    fake_req.is_disconnected = AsyncMock(return_value=True)
+
+    async def _run():
+        resp = await stream_log_tail(sess.pid, fake_req)
+        agen = resp.body_iterator
+        first = await agen.__anext__()
+        await agen.aclose()
+        return first
+
+    first = asyncio.run(_run())
+    if isinstance(first, bytes):
+        first = first.decode("utf-8")
+    assert "event: snapshot" in first
+    payload = first.split("data: ", 1)[1].strip()
+    data = _json.loads(payload)
+    entries = data["entries"]
+    # We yield the last 20 entries from the tail slice; older lines must not
+    # have been parsed because we never read them. The newest entry's index
+    # equals last_i, and the snapshot must end at or near last_i.
+    assert len(entries) == 20
+    assert entries[-1]["i"] == last_i
+    # First entry in the snapshot must be much greater than 0 — we discarded
+    # the bulk of the file. Sanity bound: must be deep into the file.
+    assert entries[0]["i"] > 100
+
+
+def test_log_stream_snapshot_uses_thread(populated_app, tmp_path, monkeypatch):
+    """#87: the snapshot read must run via asyncio.to_thread so a slow disk
+    or huge file doesn't block the event loop."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from backend.api import sessions as sessions_mod
+    from backend.api.sessions import stream_log_tail
+
+    client, fastapi_app, sess = populated_app  # noqa: F841
+    fastapi_app.state.s.config["show_log_text"] = True
+
+    log = tmp_path / "small.jsonl"
+    log.write_text('{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n')
+    sess.conversation_log_path = str(log)
+
+    calls: list = []
+    real_to_thread = sessions_mod.asyncio.to_thread
+
+    async def spy_to_thread(func, *args, **kwargs):
+        calls.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(sessions_mod.asyncio, "to_thread", spy_to_thread)
+
+    fake_req = MagicMock()
+    fake_req.app = fastapi_app
+    fake_req.is_disconnected = AsyncMock(return_value=True)
+
+    async def _run():
+        resp = await stream_log_tail(sess.pid, fake_req)
+        agen = resp.body_iterator
+        await agen.__anext__()
+        await agen.aclose()
+
+    asyncio.run(_run())
+    assert len(calls) >= 1, "expected snapshot read to be dispatched via to_thread"
+
+
 def test_focus_falls_back_to_applescript_when_manager_returns_false(populated_app, monkeypatch):
     """#24: when focus_session returns False, /focus must fall through to the
     existing AppleScript paths."""
