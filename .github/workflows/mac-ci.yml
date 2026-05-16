@@ -23,14 +23,22 @@ concurrency:
 jobs:
   build:
     name: swift build + test
-    runs-on: macos-14
+    # macos-15 is the first runner image with Swift 6.0 toolchain (Xcode 16).
+    # mac/Package.swift declares `swift-tools-version: 6.0`; macos-14 ships
+    # Swift 5.10 and fails to even parse the manifest.
+    runs-on: macos-15
     timeout-minutes: 8
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show Swift / Xcode version
+      - name: Select Xcode 16 (Swift 6.0 toolchain)
         run: |
+          # macos-15 images preinstall multiple Xcodes; pick the newest 16.x.
+          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE" ]; then
+            sudo xcode-select -s "$XCODE"
+          fi
           xcode-select -p
           swift --version
 
