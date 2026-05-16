@@ -54,23 +54,23 @@
 
       <!-- Stats row -->
       <section class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.active" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Active</div>
           <div class="text-2xl font-semibold mt-1" x-text="stats.active ?? 0"></div>
         </div>
-        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.sessions_today" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Today sessions</div>
           <div class="text-2xl font-semibold mt-1" x-text="stats.sessions_today ?? 0"></div>
         </div>
-        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.active_tokens" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Tokens (active)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtNum(stats.active_tokens ?? 0)"></div>
         </div>
-        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.active_cost" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Cost (active, est.)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtMoney(stats.active_cost ?? 0)"></div>
         </div>
-        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.cost_today" class="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Cost (24h, est.)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtMoney(stats.cost_today ?? 0)"></div>
         </div>
@@ -298,6 +298,33 @@
                  @change="saveConfig({file_change_retention_minutes: config.file_change_retention_minutes})" />
         </label>
       </div>
+
+      <section class="mb-8">
+        <h2 class="text-lg font-semibold mb-3">Dashboard cards</h2>
+        <p class="text-sm text-zinc-400 mb-4">Toggle which summary cards appear at the top of the dashboard. Preferences are saved in this browser.</p>
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40 cursor-pointer hover:border-zinc-700">
+            <input type="checkbox" x-model="cardVisibility.active" @change="saveCardVisibility()" class="size-4 accent-emerald-500">
+            <span class="text-sm">Active sessions count</span>
+          </label>
+          <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40 cursor-pointer hover:border-zinc-700">
+            <input type="checkbox" x-model="cardVisibility.sessions_today" @change="saveCardVisibility()" class="size-4 accent-emerald-500">
+            <span class="text-sm">Today sessions</span>
+          </label>
+          <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40 cursor-pointer hover:border-zinc-700">
+            <input type="checkbox" x-model="cardVisibility.active_tokens" @change="saveCardVisibility()" class="size-4 accent-emerald-500">
+            <span class="text-sm">Active tokens</span>
+          </label>
+          <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40 cursor-pointer hover:border-zinc-700">
+            <input type="checkbox" x-model="cardVisibility.active_cost" @change="saveCardVisibility()" class="size-4 accent-emerald-500">
+            <span class="text-sm">Active cost ($)</span>
+          </label>
+          <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40 cursor-pointer hover:border-zinc-700">
+            <input type="checkbox" x-model="cardVisibility.cost_today" @change="saveCardVisibility()" class="size-4 accent-emerald-500">
+            <span class="text-sm">24h cost ($)</span>
+          </label>
+        </div>
+      </section>
 
       <div>
         <h3 class="text-lg font-medium mb-2">Pricing (USD per million tokens)</h3>
