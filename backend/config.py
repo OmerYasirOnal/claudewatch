@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -80,8 +81,15 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
 
 
 def ensure_config_dir() -> None:
+    # #40: ~/.claudewatch contains session metadata, conversation log paths,
+    # and (via state.db, also written here) cost/usage history. We chmod the
+    # directory 0700 so other local users on shared macOS hosts can't enumerate
+    # or read its children — this protects state.db too, which aiosqlite opens
+    # outside this code path.
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+    os.chmod(LOGS_DIR, 0o700)
 
 
 def load_config() -> dict[str, Any]:
@@ -95,10 +103,26 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(cfg: dict[str, Any]) -> None:
+    # #42: write atomically. A SIGKILL or disk-full mid-write must NOT leave a
+    # truncated config.toml that breaks startup, so we dump to <path>.tmp first
+    # and then os.replace into place (atomic on POSIX within the same dir).
     ensure_config_dir()
     merged = _deep_merge(DEFAULT_CONFIG, cfg)
-    with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump(merged, f)
+    tmp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+    try:
+        with open(tmp_path, "wb") as f:
+            tomli_w.dump(merged, f)
+    except Exception:
+        # Don't leave .tmp turds behind on failure.
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    os.replace(tmp_path, CONFIG_PATH)
+    # #40: config.toml itself is also 0600 so even if the dir mode is loosened
+    # later (manual chmod, restore-from-backup, etc.) the file stays private.
+    os.chmod(CONFIG_PATH, 0o600)
 
 
 def update_config(updates: dict[str, Any]) -> dict[str, Any]:
