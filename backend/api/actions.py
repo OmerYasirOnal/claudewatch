@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import getpass
 import logging
 import os
 import re
 import shlex
 import signal
 import subprocess
-import time
 from pathlib import Path
 
+import psutil
 from fastapi import APIRouter, HTTPException, Request
 
+from backend.detectors.process_detector import VALUE_TAKING_FLAGS, is_claude_process
 from backend.models import NewSessionRequest
 
 router = APIRouter(prefix="/api")
@@ -20,20 +23,6 @@ APPLESCRIPT_DIR = Path(__file__).resolve().parent.parent / "applescript"
 
 # A flag is `--name` or `--name=value`. Names: lowercase + digits + dash, must start lowercase.
 SAFE_FLAG_RE = re.compile(r"^--[a-z][a-z0-9-]*(=[A-Za-z0-9._/=:,@-]+)?$")
-VALUE_FLAG_NAMES = {
-    "--model",
-    "--system-prompt-file",
-    "--print",
-    "--mcp-config",
-    "--settings",
-    "--add-dir",
-    "--permission-mode",
-    "--allowed-tools",
-    "--disallowed-tools",
-    "--resume",
-    "--session-id",
-    "--agent",
-}
 UNSAFE_VALUE_CHARS = (";", "&", "|", "`", "$", "\n", "\r", ">", "<", "\\", "\x00")
 
 
@@ -67,7 +56,7 @@ def sanitize_new_session(body: NewSessionRequest) -> tuple[str, list[str]]:
         except (FileNotFoundError, OSError):
             raise HTTPException(400, "command not found")
         allowed_prefixes = [home / ".local" / "bin", home / "Library" / "Application Support" / "Claude"]
-        if not any(str(cmd_path).startswith(str(p)) for p in allowed_prefixes):
+        if not any(cmd_path == p or p in cmd_path.parents for p in allowed_prefixes):
             raise HTTPException(400, "command must live under ~/.local/bin or Claude support dir")
         cmd_str = str(cmd_path)
 
@@ -80,7 +69,7 @@ def sanitize_new_session(body: NewSessionRequest) -> tuple[str, list[str]]:
         out_flags.append(f)
         # Value-taking flag → swallow next token as value
         flag_name = f.split("=", 1)[0]
-        if flag_name in VALUE_FLAG_NAMES and "=" not in f:
+        if flag_name in VALUE_TAKING_FLAGS and "=" not in f:
             if i + 1 >= len(body.flags):
                 raise HTTPException(400, f"flag {f} requires value")
             v = body.flags[i + 1]
@@ -103,7 +92,8 @@ async def new_session(body: NewSessionRequest, request: Request):
     )
     script_path = APPLESCRIPT_DIR / script_name
     try:
-        subprocess.run(
+        await asyncio.to_thread(
+            subprocess.run,
             ["osascript", str(script_path), cwd, cmd_str],
             check=True,
             timeout=10,
@@ -124,6 +114,15 @@ async def halt(pid: int, request: Request):
     s = _state(request)
     if pid not in s.sessions:
         raise HTTPException(404, "session not found")
+    # #33: re-verify the target is still a Claude process before SIGINT'ing it.
+    # Between the scan and now the PID could have been reused by an unrelated
+    # process belonging to the same user.
+    try:
+        proc = psutil.Process(pid)
+        if not is_claude_process(proc, getpass.getuser()):
+            raise HTTPException(409, "PID no longer refers to a claude session")
+    except psutil.NoSuchProcess:
+        raise HTTPException(404, "process not running")
     try:
         os.kill(pid, signal.SIGINT)
     except ProcessLookupError:
@@ -131,13 +130,14 @@ async def halt(pid: int, request: Request):
     except PermissionError:
         raise HTTPException(403, "permission denied")
     # Wait up to 5s for the process to exit
-    deadline = time.time() + 5
-    while time.time() < deadline:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5
+    while loop.time() < deadline:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             return {"success": True, "exited": True}
-        time.sleep(0.2)
+        await asyncio.sleep(0.2)
     return {"success": True, "exited": False, "note": "SIGINT sent; process still running"}
 
 
@@ -158,7 +158,8 @@ async def focus(pid: int, request: Request):
     )
     if sess.location_type == "tmux" and not has_iterm_link and sess.tmux_session is not None:
         try:
-            r = subprocess.run(
+            r = await asyncio.to_thread(
+                subprocess.run,
                 ["tmux", "list-clients", "-t", sess.tmux_session],
                 check=False,
                 timeout=3,
@@ -188,7 +189,8 @@ async def focus(pid: int, request: Request):
         if api_focused:
             pass  # Python-API path handled it; skip AppleScript.
         elif sess.iterm_tty:
-            r = subprocess.run(
+            r = await asyncio.to_thread(
+                subprocess.run,
                 [
                     "osascript",
                     str(APPLESCRIPT_DIR / "focus_by_tty.applescript"),
@@ -201,28 +203,17 @@ async def focus(pid: int, request: Request):
             )
             if r.stdout.strip() == "not_found":
                 raise HTTPException(404, f"iTerm session for {sess.iterm_tty} not found")
-        elif sess.iterm_window_id and sess.iterm_tab_id:
-            subprocess.run(
-                [
-                    "osascript",
-                    str(APPLESCRIPT_DIR / "focus_iterm.applescript"),
-                    str(sess.iterm_window_id),
-                    str(sess.iterm_tab_id),
-                ],
-                check=True,
-                timeout=5,
-                capture_output=True,
-                text=True,
-            )
         if sess.location_type == "tmux" and sess.tmux_session is not None:
-            subprocess.run(
+            await asyncio.to_thread(
+                subprocess.run,
                 ["tmux", "select-window", "-t", f"{sess.tmux_session}:{sess.tmux_window}"],
                 check=True,
                 timeout=3,
                 capture_output=True,
                 text=True,
             )
-            subprocess.run(
+            await asyncio.to_thread(
+                subprocess.run,
                 [
                     "tmux",
                     "select-pane",
