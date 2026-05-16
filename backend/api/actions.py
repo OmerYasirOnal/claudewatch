@@ -151,6 +151,25 @@ async def focus(pid: int, request: Request):
     if sess.location_type == "headless":
         raise HTTPException(400, "headless session has no window to focus")
 
+    # Issue #12: if it's a tmux session with no iTerm linkage and no attached
+    # tmux client, focusing would silently no-op. Detect and 409 instead.
+    has_iterm_link = bool(sess.iterm_tty) or (
+        sess.iterm_window_id is not None and sess.iterm_tab_id is not None
+    )
+    if sess.location_type == "tmux" and not has_iterm_link and sess.tmux_session is not None:
+        try:
+            r = subprocess.run(
+                ["tmux", "list-clients", "-t", sess.tmux_session],
+                check=False,
+                timeout=3,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(500, "focus action timed out")
+        if not r.stdout.strip():
+            raise HTTPException(409, "session is in detached tmux; no UI to focus")
+
     try:
         if sess.iterm_tty:
             r = subprocess.run(
