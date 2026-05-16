@@ -58,6 +58,7 @@
         <button class="px-3 py-1.5 rounded-md" :class="view==='insights' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('insights'); if (view==='insights') loadInsights()">Insights</button>
         <button class="px-3 py-1.5 rounded-md" :class="view==='files' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('files')">Files</button>
         <button class="px-3 py-1.5 rounded-md" :class="view==='history' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('history'); if (view==='history') loadHistory()">History</button>
+        <button class="px-3 py-1.5 rounded-md" :class="view==='status' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('status')">Status</button>
         <button class="px-3 py-1.5 rounded-md" :class="view==='settings' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="switchView('settings')">Settings</button>
       </nav>
       <div class="flex-1"></div>
@@ -651,11 +652,50 @@
     </div>
 
     <!-- History view -->
-    <div x-show="view==='history'">
-      <h2 class="text-xl font-semibold mb-4">History (last 24h)</h2>
+    <div x-show="view==='history'" class="space-y-6">
+      <div class="flex items-end justify-between gap-4 flex-wrap">
+        <div>
+          <h2 class="text-xl font-semibold mb-1">History</h2>
+          <p class="text-sm text-zinc-400">Ended sessions, plus an hourly activity chart over the last 24h.</p>
+        </div>
+        <button @click="pruneNow(48)"
+                class="px-3 py-1.5 rounded-md bg-rose-900/40 text-rose-200 hover:bg-rose-900/70 border border-rose-800/50 text-sm">
+          Prune now (&gt;48h)
+        </button>
+      </div>
+
+      <!-- Sessions-per-hour bar chart -->
+      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <h3 class="text-sm font-medium mb-3 text-zinc-300">Sessions per hour (last 24h)</h3>
+        <canvas id="history-bar" class="w-full" style="height: 160px;"></canvas>
+      </section>
+
+      <!-- Filter chips -->
+      <div class="flex items-center gap-2 text-xs flex-wrap">
+        <template x-for="f in [
+          { id: 'all', label: 'All' },
+          { id: 'today', label: 'Today' },
+          { id: 'week', label: 'This week' },
+          { id: 'high-cost', label: 'High-cost ($1+)' },
+        ]" :key="f.id">
+          <button @click="historyFilter = f.id"
+                  :class="historyFilter===f.id ? 'bg-zinc-700 text-white border-zinc-600' : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:border-zinc-700'"
+                  class="px-3 py-1 rounded-full border">
+            <span x-text="f.label"></span>
+          </button>
+        </template>
+        <div class="flex-1"></div>
+        <span class="text-zinc-500">
+          <span x-text="visibleHistory().length"></span> /
+          <span x-text="(history || []).length"></span> shown
+        </span>
+      </div>
+
+      <!-- History table -->
       <table class="w-full text-sm">
         <thead>
           <tr class="text-zinc-400 text-xs uppercase tracking-wide border-b border-zinc-800">
+            <th class="text-left py-2 px-2 w-6"></th>
             <th class="text-left py-2 px-2">PID</th>
             <th class="text-left py-2 px-2">cwd</th>
             <th class="text-left py-2 px-2">Model</th>
@@ -665,9 +705,12 @@
             <th class="text-left py-2 px-2">Ended</th>
           </tr>
         </thead>
-        <tbody>
-          <template x-for="h in history" :key="h.pid + '|' + h.started_at">
-            <tr class="border-b border-zinc-900/70 hover:bg-zinc-900/40">
+        <template x-for="h in visibleHistory()" :key="historyKey(h)">
+          <tbody>
+            <tr class="border-b border-zinc-900/70 hover:bg-zinc-900/40 cursor-pointer"
+                @click="toggleHistoryRow(h)">
+              <td class="py-1.5 px-2 text-zinc-500 text-xs select-none"
+                  x-text="isHistoryRowExpanded(h) ? '▾' : '▸'"></td>
               <td class="py-1.5 px-2 font-mono text-xs" x-text="h.pid"></td>
               <td class="py-1.5 px-2 font-mono text-xs text-zinc-300" x-text="h.cwd"></td>
               <td class="py-1.5 px-2 text-xs" x-text="h.model || '—'"></td>
@@ -676,13 +719,235 @@
               <td class="py-1.5 px-2 text-xs text-zinc-400" x-text="fmtTime(h.started_at)"></td>
               <td class="py-1.5 px-2 text-xs text-zinc-400" x-text="fmtTime(h.ended_at)"></td>
             </tr>
-          </template>
-          <template x-if="!history.length">
-            <tr><td :colspan="showCost() ? 7 : 6" class="text-center py-8 text-zinc-500">No ended sessions in the last 24 hours.</td></tr>
-          </template>
+            <tr x-show="isHistoryRowExpanded(h)" class="border-b border-zinc-900/70 bg-zinc-950/40">
+              <td :colspan="showCost() ? 8 : 7" class="px-4 py-3">
+                <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-1">Session summary (JSON)</div>
+                <pre class="text-[11px] font-mono text-zinc-300 whitespace-pre-wrap break-words max-h-96 overflow-auto bg-zinc-950/70 border border-zinc-800 rounded p-3"
+                     x-text="historySummaryJson(h)"></pre>
+              </td>
+            </tr>
+          </tbody>
+        </template>
+        <tbody x-show="!visibleHistory().length">
+          <tr><td :colspan="showCost() ? 8 : 7" class="text-center py-8 text-zinc-500">No matching ended sessions.</td></tr>
         </tbody>
       </table>
     </div>
+
+    <!-- Status view -->
+    <div x-show="view==='status'" class="space-y-6">
+      <div>
+        <h2 class="text-xl font-semibold mb-1">Status</h2>
+        <p class="text-sm text-zinc-400">Live daemon health, log tail, and DB controls. Refreshes every 5s while this tab is open.</p>
+      </div>
+
+      <!-- Toast for prune/restart -->
+      <template x-if="_adminPostToast">
+        <div class="rounded-md bg-emerald-900/30 border border-emerald-800/60 text-emerald-200 text-sm px-3 py-2"
+             x-text="_adminPostToast"></div>
+      </template>
+
+      <!-- Section A: Daemon info card -->
+      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <header class="flex items-center justify-between mb-4">
+          <div class="flex items-center gap-2">
+            <h3 class="text-sm font-medium text-zinc-200">Daemon</h3>
+            <template x-if="adminStatus">
+              <span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-900/40 text-emerald-300 border border-emerald-800/50">
+                <span class="size-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                running
+              </span>
+            </template>
+            <template x-if="restartState === 'restarting'">
+              <span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-900/40 text-amber-200 border border-amber-800/50">
+                Restarting…
+              </span>
+            </template>
+          </div>
+          <button @click="requestRestart()"
+                  :disabled="restartState === 'restarting'"
+                  class="px-3 py-1.5 rounded-md bg-rose-900/40 hover:bg-rose-900/70 text-rose-200 border border-rose-800/50 text-sm disabled:opacity-50">
+            Restart daemon
+          </button>
+        </header>
+
+        <template x-if="adminStatusError">
+          <div class="text-rose-300 text-sm mb-3" x-text="adminStatusError"></div>
+        </template>
+
+        <template x-if="adminStatus">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Version</span>
+              <span class="font-mono" x-text="adminStatus.version"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">PID</span>
+              <span class="font-mono" x-text="adminStatus.pid"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Python</span>
+              <span class="font-mono" x-text="adminStatus.python_version"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Uptime</span>
+              <span class="font-mono" x-text="fmtDuration(adminStatus.uptime_seconds)"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Started at</span>
+              <span class="font-mono text-xs" x-text="fmtTime(adminStatus.started_at)"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Active sessions</span>
+              <span class="font-mono" x-text="adminStatus.active_sessions"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">DB rows (history)</span>
+              <span class="font-mono" x-text="fmtNum(adminStatus.history_rows)"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">DB size</span>
+              <span class="font-mono" x-text="historyFmtBytes(adminStatus.history_db_size_bytes)"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1 md:col-span-2">
+              <span class="text-zinc-400">Log file</span>
+              <span class="font-mono text-xs truncate ml-3" :title="adminStatus.log_file"
+                    x-text="adminStatus.log_file + ' (' + historyFmtBytes(adminStatus.log_file_size_bytes) + ')'"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Process scan interval</span>
+              <span class="font-mono" x-text="(adminStatus.scheduler?.process_scan_interval_seconds ?? '—') + 's'"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">iTerm refresh interval</span>
+              <span class="font-mono" x-text="(adminStatus.scheduler?.iterm_refresh_interval_seconds ?? '—') + 's'"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Last prune</span>
+              <span class="font-mono text-xs" x-text="adminStatus.scheduler?.last_prune_at ? relTime(adminStatus.scheduler.last_prune_at) : 'never'"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Next prune in</span>
+              <span class="font-mono text-xs"
+                    x-text="adminStatus.scheduler?.next_prune_in_seconds != null ? fmtDuration(adminStatus.scheduler.next_prune_in_seconds) : '—'"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1 md:col-span-2">
+              <span class="text-zinc-400">iTerm connection</span>
+              <span class="inline-flex items-center gap-2">
+                <span class="size-2 rounded-full"
+                      :class="adminStatus.iterm?.connected
+                              ? 'bg-emerald-400'
+                              : (adminStatus.iterm?.last_error_at ? 'bg-rose-400' : 'bg-zinc-500')"></span>
+                <span class="text-xs"
+                      x-text="adminStatus.iterm?.connected
+                              ? 'connected'
+                              : (adminStatus.iterm?.last_error_at
+                                  ? ('error · last at ' + relTime(adminStatus.iterm.last_error_at))
+                                  : 'disconnected')"></span>
+              </span>
+            </div>
+          </div>
+        </template>
+        <template x-if="!adminStatus && !adminStatusError">
+          <div class="text-zinc-500 text-sm">Loading status…</div>
+        </template>
+      </section>
+
+      <!-- Section B: Log viewer -->
+      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <header class="flex items-center gap-2 flex-wrap mb-3">
+          <h3 class="text-sm font-medium text-zinc-200">Server log</h3>
+          <span class="text-[11px] text-zinc-500" x-show="adminLogs.truncated">
+            (truncated to last ~1 MB)
+          </span>
+          <div class="flex-1"></div>
+          <input type="text"
+                 :value="adminLogsGrep"
+                 @input="onAdminLogsGrepInput($event.target.value)"
+                 placeholder="grep…"
+                 class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs w-44 focus:outline-none focus:border-emerald-500" />
+          <select x-model.number="adminLogsLineCount" @change="onAdminLogsLineCountChange()"
+                  class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs">
+            <option :value="50">50</option>
+            <option :value="100">100</option>
+            <option :value="200">200</option>
+            <option :value="500">500</option>
+            <option :value="1000">1000</option>
+          </select>
+          <label class="inline-flex items-center gap-1 text-xs text-zinc-400">
+            <input type="checkbox" x-model="adminLogsTail" class="size-3.5 accent-emerald-500" />
+            Tail
+          </label>
+          <button @click="loadAdminLogs()"
+                  class="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs">
+            Refresh
+          </button>
+        </header>
+
+        <template x-if="adminLogsError">
+          <div class="text-rose-300 text-xs mb-2" x-text="adminLogsError"></div>
+        </template>
+
+        <pre id="admin-log-view"
+             class="text-[11px] font-mono leading-snug whitespace-pre-wrap break-words bg-zinc-950/70 border border-zinc-800 rounded p-3 max-h-[480px] overflow-auto"><template x-for="(line, i) in (adminLogs.lines || [])" :key="i"><span :class="adminLogLineClass(line)" x-text="line + '\n'"></span></template><template x-if="!(adminLogs.lines && adminLogs.lines.length)"><span class="text-zinc-500">No log lines.</span></template></pre>
+
+        <div class="text-[11px] text-zinc-500 mt-2 truncate" x-show="adminLogs.path">
+          <span x-text="adminLogs.path"></span>
+          · <span x-text="historyFmtBytes(adminLogs.size_bytes)"></span>
+        </div>
+      </section>
+
+      <!-- Section C: DB controls -->
+      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <header class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-medium text-zinc-200">Database</h3>
+        </header>
+        <template x-if="adminStatus">
+          <div class="text-sm text-zinc-300 mb-3 flex flex-wrap gap-x-4 gap-y-1">
+            <span>Active sessions: <span class="font-mono" x-text="adminStatus.active_sessions"></span></span>
+            <span class="text-zinc-500">·</span>
+            <span>Historical rows: <span class="font-mono" x-text="fmtNum(adminStatus.history_rows)"></span></span>
+            <span class="text-zinc-500">·</span>
+            <span>DB size: <span class="font-mono" x-text="historyFmtBytes(adminStatus.history_db_size_bytes)"></span></span>
+          </div>
+        </template>
+        <div class="flex items-center gap-2 text-sm flex-wrap">
+          <label class="text-zinc-400">Prune older than</label>
+          <input type="number" min="1" step="1" x-model.number="pruneHoursInput"
+                 class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-sm w-20 focus:outline-none focus:border-emerald-500" />
+          <span class="text-zinc-400">hours</span>
+          <button @click="pruneNow(pruneHoursInput)"
+                  class="ml-2 px-3 py-1.5 rounded-md bg-rose-900/40 hover:bg-rose-900/70 text-rose-200 border border-rose-800/50 text-sm">
+            Prune now
+          </button>
+        </div>
+        <p class="text-[11px] text-zinc-500 mt-3">
+          Pruning removes ended-session rows from the SQLite history DB. Active sessions are never touched.
+        </p>
+      </section>
+    </div>
+
+    <!-- Restart confirm modal -->
+    <template x-if="restartConfirmOpen">
+      <div class="fixed inset-0 z-30 flex items-center justify-center bg-black/60" @click.self="restartConfirmOpen=false">
+        <div class="rounded-xl border border-zinc-800 bg-zinc-950 p-6 max-w-md w-full mx-4">
+          <h3 class="text-lg font-semibold mb-2">Restart backend?</h3>
+          <p class="text-sm text-zinc-400 mb-4">
+            This will SIGTERM the daemon. Active SSE streams will reconnect automatically once it comes back.
+            The bundled launcher / launchd will respawn the process; if you're running uvicorn manually, you'll
+            need to restart it yourself.
+          </p>
+          <div class="flex items-center justify-end gap-2">
+            <button @click="restartConfirmOpen=false"
+                    class="px-3 py-1.5 rounded-md border border-zinc-700 hover:border-zinc-600 text-sm">Cancel</button>
+            <button @click="restartDaemon()"
+                    class="px-3 py-1.5 rounded-md bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium">
+              Restart
+            </button>
+          </div>
+        </div>
+      </div>
+    </template>
 
     <!-- Settings view -->
     <div x-show="view==='settings'" class="max-w-2xl">
@@ -1141,6 +1406,7 @@
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g f</kbd><span>Files</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g h</kbd><span>History</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g s</kbd><span>Settings</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g t</kbd><span>Status</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">?</kbd><span>Show this cheat-sheet</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">Esc</kbd><span>Close modal</span>
         </div>
