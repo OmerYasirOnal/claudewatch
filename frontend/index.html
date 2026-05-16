@@ -56,6 +56,7 @@
       <nav class="flex items-center gap-1 ml-4 text-sm">
         <button class="px-3 py-1.5 rounded-md" :class="view==='dashboard' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='dashboard'">Dashboard</button>
         <button class="px-3 py-1.5 rounded-md" :class="view==='insights' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='insights'; loadInsights()">Insights</button>
+        <button class="px-3 py-1.5 rounded-md" :class="view==='files' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='files'">Files</button>
         <button class="px-3 py-1.5 rounded-md" :class="view==='history' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='history'; loadHistory()">History</button>
         <button class="px-3 py-1.5 rounded-md" :class="view==='settings' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='settings'">Settings</button>
       </nav>
@@ -119,11 +120,11 @@
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Tokens (active)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtNum(stats.active_tokens ?? 0)"></div>
         </div>
-        <div x-show="cardVisibility.active_cost" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.active_cost && showCost()" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Cost (active, est.)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtMoney(stats.active_cost ?? 0)"></div>
         </div>
-        <div x-show="cardVisibility.cost_today" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
+        <div x-show="cardVisibility.cost_today && showCost()" class="cw-stat-card rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
           <div class="text-zinc-400 text-xs uppercase tracking-wide">Cost (24h, est.)</div>
           <div class="text-2xl font-semibold mt-1" x-text="fmtMoney(stats.cost_today ?? 0)"></div>
         </div>
@@ -139,11 +140,89 @@
           </button>
         </template>
         <div class="flex-1"></div>
+        <button @click="tileMode = !tileMode; saveTileMode()"
+                :class="tileMode ? 'bg-emerald-700/40 text-emerald-200 border-emerald-700/60' : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:border-zinc-700'"
+                class="px-3 py-1 rounded-full border text-xs"
+                title="Toggle multi-session tile view">
+          <span x-text="tileMode ? '▦ Tile mode: ON' : '▦ Tile mode'"></span>
+        </button>
         <span class="text-[11px] text-zinc-500">press <kbd class="px-1 py-0.5 rounded bg-zinc-800 border border-zinc-700">?</kbd> for shortcuts</span>
       </div>
 
-      <!-- Session cards -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <!-- Tile mode grid (mini chat previews) -->
+      <div x-show="tileMode" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <template x-for="sess in tileSessions()" :key="'tile-'+sess.pid">
+          <article class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 flex flex-col min-h-[260px]"
+                   :data-session-pid="sess.pid">
+            <header class="flex items-center gap-2 mb-2 text-xs shrink-0">
+              <span class="size-2 rounded-full"
+                    :class="{
+                      'bg-emerald-400 animate-pulse': sess.is_in_flight,
+                      'bg-emerald-400': !sess.is_in_flight && sess.status==='working',
+                      'bg-amber-400': !sess.is_in_flight && sess.status==='waiting',
+                      'bg-zinc-500': !sess.is_in_flight && sess.status==='idle',
+                    }"></span>
+              <span class="font-mono text-zinc-400">PID <span x-text="sess.pid"></span></span>
+              <span class="text-zinc-500 font-mono truncate" :title="sess.cwd" x-text="(sess.cwd || '').split('/').slice(-2).join('/')"></span>
+              <div class="flex-1"></div>
+              <button @click="focusSession(sess)" :disabled="sess.location_type==='headless'"
+                      class="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">Focus</button>
+              <button @click="openChat(sess.pid)" class="px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-200 hover:bg-emerald-900/70 text-[10px]">Chat</button>
+              <button @click="haltSession(sess)" class="px-1.5 py-0.5 rounded bg-rose-900/40 text-rose-200 hover:bg-rose-900/70 text-[10px]">Halt</button>
+            </header>
+            <div class="flex-1 overflow-y-auto space-y-1.5 text-[11px] pr-1">
+              <template x-if="!tilePreviewEntries(sess.pid).length">
+                <div class="text-zinc-500 text-center py-6">Loading recent messages…</div>
+              </template>
+              <template x-for="(entry, i) in tilePreviewEntries(sess.pid)" :key="chatEntryKey(entry, i)">
+                <div>
+                  <template x-if="chatEntryIsRedacted(entry)">
+                    <div class="text-zinc-500 italic px-1.5 py-1 rounded bg-zinc-900/60 border border-zinc-800">[hidden]</div>
+                  </template>
+                  <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'user' && chatEntryText(entry)">
+                    <div class="rounded px-2 py-1 bg-sky-900/30 border border-sky-800/50 text-sky-100 whitespace-pre-wrap break-words line-clamp-3">
+                      <span class="text-[9px] uppercase tracking-wide text-sky-300/70 mr-1">user</span>
+                      <span x-text="chatEntryText(entry).slice(0, 240)"></span>
+                    </div>
+                  </template>
+                  <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'assistant' && chatEntryText(entry)">
+                    <div class="rounded px-2 py-1 bg-emerald-950/30 border border-emerald-900/50 text-emerald-100 whitespace-pre-wrap break-words line-clamp-3">
+                      <span class="text-[9px] uppercase tracking-wide text-emerald-300/70 mr-1">asst</span>
+                      <span x-text="chatEntryText(entry).slice(0, 240)"></span>
+                    </div>
+                  </template>
+                  <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'assistant' && chatEntryToolUses(entry).length">
+                    <div class="flex flex-wrap gap-1 mt-0.5">
+                      <template x-for="(tu, j) in chatEntryToolUses(entry)" :key="j">
+                        <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-300 font-mono">
+                          <span>🔧</span><span x-text="tu.name"></span>
+                        </span>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="!chatEntryIsRedacted(entry) && chatEntryRole(entry) === 'tool_result' && chatEntryText(entry)">
+                    <pre class="text-[10px] bg-zinc-900/60 border border-zinc-800 rounded p-1.5 overflow-hidden text-zinc-300 whitespace-pre-wrap line-clamp-2"
+                         x-text="chatEntryText(entry).slice(0, 200)"></pre>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </article>
+        </template>
+        <template x-if="visibleSessions().length > 6">
+          <div class="col-span-full text-center text-[11px] text-zinc-500">
+            Showing first 6 of <span x-text="visibleSessions().length"></span> sessions. Refine filters to see others.
+          </div>
+        </template>
+        <template x-if="!visibleSessions().length">
+          <div class="col-span-full text-center py-16 text-zinc-500 text-sm">
+            No active Claude sessions detected.
+          </div>
+        </template>
+      </div>
+
+      <!-- Session cards (default view, hidden in tile mode) -->
+      <div x-show="!tileMode" class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <template x-for="(sess, sessIdx) in visibleSessions()" :key="sess.pid">
           <article class="cw-session-card rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 hover:border-zinc-700 transition cursor-pointer"
                    :data-session-pid="sess.pid"
@@ -252,7 +331,7 @@
                 <div class="text-xs text-zinc-400 flex items-center gap-2 flex-wrap">
                   <span>🪙</span>
                   <span><span x-text="fmtNum(sess.usage.input_tokens)"></span> in / <span x-text="fmtNum(sess.usage.output_tokens)"></span> out / <span x-text="fmtNum(sess.usage.cache_read_input_tokens)"></span> cached</span>
-                  <template x-if="sess.usage.cost_estimate_usd !== null">
+                  <template x-if="sess.usage.cost_estimate_usd !== null && showCost()">
                     <span class="text-emerald-300/90">~<span x-text="fmtMoney(sess.usage.cost_estimate_usd)"></span></span>
                   </template>
                 </div>
@@ -274,7 +353,13 @@
 
               <template x-if="sess.recent_file_changes && sess.recent_file_changes.length">
                 <div class="text-xs text-zinc-400">
-                  <span>📝 <span x-text="sess.recent_file_changes.length"></span> file changes (10m)</span>
+                  <button @click.stop="jumpToFilesForSession(sess)"
+                          class="inline-flex items-center gap-1 hover:text-emerald-300 underline-offset-2 hover:underline"
+                          title="Open Files tab filtered to this session">
+                    <span>📝</span>
+                    <span><span x-text="sess.recent_file_changes.length"></span> files changed (10m)</span>
+                    <span class="text-[10px] text-zinc-600">↗</span>
+                  </button>
                   <div class="text-[11px] text-zinc-500 mt-0.5 font-mono truncate">
                     <span x-text="sess.recent_file_changes.slice(-3).map(f=>f.path).join(' · ')"></span>
                   </div>
@@ -354,7 +439,7 @@
         <p class="text-sm text-zinc-400">Live trends across your projects. Refreshes every 30s while open.</p>
       </div>
 
-      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+      <section x-show="showCost()" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
         <h3 class="text-sm font-medium mb-3 text-zinc-300">24h cost trend</h3>
         <canvas id="insights-bar" class="w-full" style="height: 180px;"></canvas>
       </section>
@@ -369,24 +454,24 @@
                 <th class="text-right py-2 px-2">Active</th>
                 <th class="text-right py-2 px-2">Sessions</th>
                 <th class="text-right py-2 px-2">Tokens</th>
-                <th class="text-right py-2 px-2">Cost</th>
+                <th x-show="showCost()" class="text-right py-2 px-2">Cost</th>
                 <th class="text-left py-2 px-2">Last active</th>
               </tr>
             </thead>
             <tbody>
-              <template x-for="p in [...insightsData.projects].sort((a,b)=>(b.total_cost_24h||0)-(a.total_cost_24h||0))" :key="p.cwd">
+              <template x-for="p in [...insightsData.projects].sort((a,b)=>showCost() ? ((b.total_cost_24h||0)-(a.total_cost_24h||0)) : ((b.total_tokens_24h||0)-(a.total_tokens_24h||0)))" :key="p.cwd">
                 <tr class="border-b border-zinc-900/70 hover:bg-zinc-900/60 cursor-pointer"
                     @click="jumpToProject(p.cwd)">
                   <td class="py-1.5 px-2 font-mono truncate max-w-xs" :title="p.cwd" x-text="p.cwd"></td>
                   <td class="py-1.5 px-2 text-right" x-text="p.active_sessions ?? 0"></td>
                   <td class="py-1.5 px-2 text-right" x-text="p.sessions_24h ?? 0"></td>
                   <td class="py-1.5 px-2 text-right" x-text="fmtNum(p.total_tokens_24h ?? 0)"></td>
-                  <td class="py-1.5 px-2 text-right text-emerald-300" x-text="fmtMoney(p.total_cost_24h ?? 0)"></td>
+                  <td x-show="showCost()" class="py-1.5 px-2 text-right text-emerald-300" x-text="fmtMoney(p.total_cost_24h ?? 0)"></td>
                   <td class="py-1.5 px-2 text-zinc-400" x-text="relTime(p.last_active_at)"></td>
                 </tr>
               </template>
               <template x-if="!insightsData.projects.length">
-                <tr><td colspan="6" class="text-center py-8 text-zinc-500">No project data yet.</td></tr>
+                <tr><td :colspan="showCost() ? 6 : 5" class="text-center py-8 text-zinc-500">No project data yet.</td></tr>
               </template>
             </tbody>
           </table>
@@ -396,6 +481,172 @@
           <h3 class="text-sm font-medium mb-3 text-zinc-300">Model usage (active)</h3>
           <canvas id="insights-donut" class="w-full" style="height: 200px;"></canvas>
         </section>
+      </div>
+    </div>
+
+    <!-- Files view -->
+    <div x-show="view==='files'" class="space-y-4">
+      <div class="flex items-end justify-between gap-4 flex-wrap">
+        <div>
+          <h2 class="text-xl font-semibold mb-1">Files changed</h2>
+          <p class="text-sm text-zinc-400">
+            Files touched by any active Claude session in the last
+            <select x-model.number="filesMinutes" @change="loadFileChanges()"
+                    class="bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 text-xs">
+              <option :value="10">10</option>
+              <option :value="30">30</option>
+              <option :value="60">60</option>
+            </select>
+            minutes.
+          </p>
+        </div>
+        <div class="flex items-center gap-2 text-xs">
+          <span class="text-zinc-500" x-show="filesLastRefresh">
+            Last refresh: <span x-text="relTime(filesLastRefresh)"></span>
+          </span>
+          <button @click="loadFileChanges()"
+                  class="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200">
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <!-- Filter row -->
+      <div class="flex items-center gap-2 flex-wrap text-xs">
+        <template x-for="k in ['All','Created','Modified','Deleted']" :key="k">
+          <button @click="filesKindFilter=k"
+                  :class="filesKindFilter===k ? 'bg-zinc-700 text-white border-zinc-600' : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:border-zinc-700'"
+                  class="px-3 py-1 rounded-full border">
+            <span x-text="k"></span>
+          </button>
+        </template>
+        <input type="text" placeholder="Filter by path…"
+               x-model="filesSearch"
+               class="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs w-56 focus:outline-none focus:border-emerald-500" />
+        <template x-if="filesPidFilter !== null">
+          <button @click="filesPidFilter=null"
+                  class="px-2 py-1 rounded-full bg-emerald-900/40 text-emerald-200 border border-emerald-700/40">
+            PID <span x-text="filesPidFilter"></span> ×
+          </button>
+        </template>
+        <div class="flex-1"></div>
+        <span class="text-zinc-500" x-show="!fileChangesUnavailable">
+          <span x-text="visibleFileChanges().length"></span> /
+          <span x-text="(fileChanges || []).length"></span> shown
+        </span>
+      </div>
+
+      <template x-if="fileChangesUnavailable">
+        <div class="rounded-lg border border-amber-700/40 bg-amber-950/30 text-amber-200 text-sm px-4 py-3">
+          File-changes API not available yet (backend endpoint <code>/api/file-changes</code> returned 404). This feature will light up once the backend updates land.
+        </div>
+      </template>
+
+      <template x-if="fileChangesError">
+        <div class="rounded-lg border border-rose-700/40 bg-rose-950/30 text-rose-200 text-sm px-4 py-3"
+             x-text="fileChangesError"></div>
+      </template>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- Table -->
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900/40 overflow-hidden">
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="text-zinc-400 uppercase tracking-wide border-b border-zinc-800">
+                <th class="text-left py-2 px-2 w-8">·</th>
+                <th class="text-left py-2 px-2">Path</th>
+                <th class="text-left py-2 px-2">Session</th>
+                <th class="text-left py-2 px-2 w-20">Age</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(c, i) in visibleFileChanges()" :key="(c.abs_path || c.path) + '|' + c.ts + '|' + i">
+                <tr class="border-b border-zinc-900/70 hover:bg-zinc-900/60 cursor-pointer"
+                    :class="(filesSelected && filesSelected.path === c.path && filesSelected.cwd === c.cwd) ? 'bg-zinc-800/60' : ''"
+                    @click="selectFileChange(c)">
+                  <td class="py-1.5 px-2 text-center font-mono text-base"
+                      :class="fileChangeKindColor(c.kind)"
+                      :title="c.kind"
+                      x-text="fileChangeKindIcon(c.kind)"></td>
+                  <td class="py-1.5 px-2 font-mono truncate max-w-[260px]" :title="c.abs_path || c.path">
+                    <div class="text-zinc-300 truncate" x-text="c.path"></div>
+                    <div class="text-[10px] text-zinc-500 truncate" x-text="c.project || c.cwd"></div>
+                  </td>
+                  <td class="py-1.5 px-2 text-zinc-400">
+                    <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-[10px]">
+                      <span x-text="(c.project || '').split('/').pop() || '—'"></span>
+                      <template x-if="Array.isArray(c.session_pids) && c.session_pids.length">
+                        <span class="text-emerald-300">·<span x-text="c.session_pids[0]"></span></span>
+                      </template>
+                    </span>
+                  </td>
+                  <td class="py-1.5 px-2 text-zinc-500" x-text="relTime(c.ts)"></td>
+                </tr>
+              </template>
+              <template x-if="!fileChangesUnavailable && !visibleFileChanges().length">
+                <tr><td colspan="4" class="text-center py-10 text-zinc-500">No file changes match.</td></tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Diff side panel -->
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900/40">
+          <template x-if="!filesSelected">
+            <div class="px-4 py-12 text-center text-sm text-zinc-500">
+              Select a file from the list to see its diff.
+            </div>
+          </template>
+          <template x-if="filesSelected">
+            <div class="flex flex-col h-full">
+              <header class="flex items-start justify-between gap-2 px-4 py-3 border-b border-zinc-800">
+                <div class="min-w-0">
+                  <div class="text-[11px] text-zinc-500 font-mono truncate" x-text="filesSelected.project || filesSelected.cwd"></div>
+                  <div class="text-sm font-mono truncate text-zinc-200" :title="filesSelected.abs_path || filesSelected.path" x-text="filesSelected.path"></div>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <button @click="openInEditor()"
+                          :disabled="!(config.editor && config.editor.enabled)"
+                          :title="(config.editor && config.editor.enabled) ? 'Open in editor' : 'Enable editor in Settings'"
+                          class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                    Open in editor
+                  </button>
+                  <button @click="closeFileDiff()" class="text-zinc-400 hover:text-white text-lg leading-none px-1">×</button>
+                </div>
+              </header>
+              <template x-if="_editorOpenStatus">
+                <div class="px-4 py-1.5 text-[11px] text-amber-200 bg-amber-950/30 border-b border-amber-900/40" x-text="_editorOpenStatus"></div>
+              </template>
+              <div class="flex-1 overflow-auto p-3 text-xs font-mono">
+                <template x-if="filesDiffLoading">
+                  <div class="text-zinc-500 text-center py-8">Loading diff…</div>
+                </template>
+                <template x-if="filesDiffError">
+                  <div class="text-rose-300 bg-rose-950/30 border border-rose-900/40 rounded px-3 py-2" x-text="filesDiffError"></div>
+                </template>
+                <template x-if="filesDiff && !filesDiffLoading && !filesDiffError">
+                  <div class="space-y-3">
+                    <template x-if="filesDiff.stat">
+                      <div class="text-[11px] text-zinc-400" x-text="filesDiff.stat"></div>
+                    </template>
+                    <template x-if="filesDiff.diff">
+                      <pre class="bg-zinc-950 rounded p-2 overflow-x-auto whitespace-pre"><template x-for="(line, i) in diffLines(filesDiff.diff)" :key="'d-'+i"><div :class="diffLineClass(line)" x-text="line || ' '"></div></template></pre>
+                    </template>
+                    <template x-if="filesDiff.untracked_preview">
+                      <div>
+                        <div class="text-[11px] text-zinc-400 mb-1">(untracked or non-git — full content)</div>
+                        <pre class="bg-amber-950/20 border border-amber-900/30 rounded p-2 overflow-x-auto text-amber-100 whitespace-pre" x-text="filesDiff.untracked_preview"></pre>
+                      </div>
+                    </template>
+                    <template x-if="!filesDiff.diff && !filesDiff.untracked_preview">
+                      <div class="text-zinc-500 text-center py-6">No changes to display.</div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
 
@@ -409,7 +660,7 @@
             <th class="text-left py-2 px-2">cwd</th>
             <th class="text-left py-2 px-2">Model</th>
             <th class="text-right py-2 px-2">Tokens</th>
-            <th class="text-right py-2 px-2">Cost</th>
+            <th x-show="showCost()" class="text-right py-2 px-2">Cost</th>
             <th class="text-left py-2 px-2">Started</th>
             <th class="text-left py-2 px-2">Ended</th>
           </tr>
@@ -421,13 +672,13 @@
               <td class="py-1.5 px-2 font-mono text-xs text-zinc-300" x-text="h.cwd"></td>
               <td class="py-1.5 px-2 text-xs" x-text="h.model || '—'"></td>
               <td class="py-1.5 px-2 text-right" x-text="fmtNum(h.total_tokens)"></td>
-              <td class="py-1.5 px-2 text-right text-emerald-300" x-text="fmtMoney(h.cost_estimate || 0)"></td>
+              <td x-show="showCost()" class="py-1.5 px-2 text-right text-emerald-300" x-text="fmtMoney(h.cost_estimate || 0)"></td>
               <td class="py-1.5 px-2 text-xs text-zinc-400" x-text="fmtTime(h.started_at)"></td>
               <td class="py-1.5 px-2 text-xs text-zinc-400" x-text="fmtTime(h.ended_at)"></td>
             </tr>
           </template>
           <template x-if="!history.length">
-            <tr><td colspan="7" class="text-center py-8 text-zinc-500">No ended sessions in the last 24 hours.</td></tr>
+            <tr><td :colspan="showCost() ? 7 : 6" class="text-center py-8 text-zinc-500">No ended sessions in the last 24 hours.</td></tr>
           </template>
         </tbody>
       </table>
@@ -437,6 +688,38 @@
     <div x-show="view==='settings'" class="space-y-6 max-w-2xl">
       <h2 class="text-xl font-semibold">Settings</h2>
       <p class="text-sm text-zinc-400">Edits save to <code class="text-emerald-300">~/.claudewatch/config.toml</code>.</p>
+
+      <!-- Plan -->
+      <section class="mb-8">
+        <h2 class="text-lg font-semibold mb-3">Plan</h2>
+        <p class="text-sm text-zinc-400 mb-4">For Max/Pro users, dollar costs are hidden since you pay a flat monthly fee. Token usage stays visible.</p>
+        <select x-model="config.plan" @change="saveConfig({plan: config.plan})" class="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-sm">
+          <option value="api">API (pay-per-token — show $)</option>
+          <option value="pro">Pro ($20/mo flat — hide $)</option>
+          <option value="max">Max 5× (hide $)</option>
+          <option value="max_20x">Max 20× (hide $)</option>
+          <option value="team">Team (hide $)</option>
+          <option value="free">Free (hide $)</option>
+        </select>
+      </section>
+
+      <!-- Editor -->
+      <section class="mb-8">
+        <h2 class="text-lg font-semibold mb-3">Editor</h2>
+        <p class="text-sm text-zinc-400 mb-3">Allow the dashboard to open files (from the Files tab) in your editor of choice.</p>
+        <label class="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40">
+          <span class="text-sm">Enable 'Open in editor' (allows the dashboard to open files in your editor)</span>
+          <input type="checkbox" x-model="config.editor.enabled" @change="saveEditorConfig()" class="size-4 accent-emerald-500" />
+        </label>
+        <label class="block mt-3">
+          <span class="text-xs text-zinc-400 uppercase tracking-wide">Editor command</span>
+          <input type="text"
+                 x-model="config.editor.command"
+                 @change="saveEditorConfig()"
+                 placeholder="code, cursor, subl, ..."
+                 class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 font-mono text-xs" />
+        </label>
+      </section>
       <div class="space-y-3">
         <label class="flex items-center justify-between gap-3">
           <span class="text-sm">Read-only mode (disables focus/halt/new actions)</span>
@@ -505,14 +788,18 @@
             <span>On session end</span>
             <input type="checkbox" x-model="config.notifications.on_session_end" @change="saveNotificationConfig()" />
           </label>
-          <label class="flex items-center justify-between gap-3">
-            <span>On high cost</span>
-            <input type="checkbox" x-model="config.notifications.on_high_cost" @change="saveNotificationConfig()" />
+          <label class="flex items-center justify-between gap-3" :class="!showCost() ? 'opacity-50' : ''">
+            <span>
+              On high cost
+              <template x-if="!showCost()"><span class="text-[11px] text-amber-300/80 block">Hidden because plan != API</span></template>
+            </span>
+            <input type="checkbox" x-model="config.notifications.on_high_cost" @change="saveNotificationConfig()" :disabled="!showCost()" />
           </label>
-          <label class="flex items-center justify-between gap-3">
+          <label class="flex items-center justify-between gap-3" :class="!showCost() ? 'opacity-50' : ''">
             <span>High-cost threshold (USD)</span>
             <input type="number" step="0.5" min="0" class="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 w-24 text-right"
                    x-model.number="config.notifications.cost_threshold_usd"
+                   :disabled="!showCost()"
                    @change="saveNotificationConfig()" />
           </label>
         </div>
@@ -816,6 +1103,7 @@
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">/</kbd><span>Focus search</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g d</kbd><span>Dashboard</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g i</kbd><span>Insights</span>
+          <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g f</kbd><span>Files</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g h</kbd><span>History</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">g s</kbd><span>Settings</span>
           <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-xs">?</kbd><span>Show this cheat-sheet</span>
