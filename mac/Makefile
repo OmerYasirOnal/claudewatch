@@ -68,6 +68,15 @@ dmg: app
 	@echo "✓ Built dist/$(APP_NAME).dmg"
 	@du -sh dist/$(APP_NAME).dmg | awk '{print "  DMG size: " $$1}'
 
+## sign — code-sign + notarize + staple. Requires Developer ID cert.
+## See mac/docs/code-signing.md for one-time setup. Run after `make dmg`.
+sign: dmg
+	@./scripts/sign-and-notarize.sh
+
+## sign-local — sign without uploading to Apple notary service (testing only).
+sign-local: dmg
+	SKIP_NOTARIZE=1 ./scripts/sign-and-notarize.sh
+
 ## test — Swift package tests (separate from the Python pytest suite at repo root).
 test:
 	swift test
