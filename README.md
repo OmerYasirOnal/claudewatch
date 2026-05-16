@@ -1,5 +1,8 @@
 # ClaudeWatch
 
+[![CI](https://github.com/OmerYasirOnal/claudewatch/actions/workflows/ci.yml/badge.svg)](https://github.com/OmerYasirOnal/claudewatch/actions/workflows/ci.yml)
+[![mac](https://github.com/OmerYasirOnal/claudewatch/actions/workflows/mac-ci.yml/badge.svg)](https://github.com/OmerYasirOnal/claudewatch/actions/workflows/mac-ci.yml)
+
 Local, system-wide monitor for `claude` CLI sessions on macOS. Shows every
 running Claude Code in one dashboard with token usage, cost estimates, tool
 calls, file changes, git context — and one-click focus / halt / new-session
@@ -8,22 +11,57 @@ actions.
 No cloud, no API key, no telemetry. Talks only to local processes and local
 files.
 
+## Quick links
+
+- [Architecture](docs/architecture.md) — the detector pipeline, two-loop
+  scheduler, and where state lives.
+- [Troubleshooting](docs/troubleshooting.md) — focus stealing, the
+  "headless everywhere" symptom, plan-aware cost, DMG quarantine, …
+- [API reference](docs/api-reference.md) — every route, grouped by router.
+- [mac/README.md](mac/README.md) — building and packaging the menu bar
+  `.app`.
+- [Permissions setup](docs/permissions-setup.md) — what macOS grants are
+  needed and where to find them.
+
 ## What it shows
 
 For every active `claude` process owned by the current user:
 
-- **Location**: iTerm window/tab, tmux session/window/pane, or headless
-- **Process**: PID, cwd, duration, CPU%, memory
-- **Status**: working / waiting / idle (heuristic from CPU + log activity)
-- **Model + permission mode**: from cmdline flags and the conversation log's `permission-mode` entries
-- **Token usage**: input / output / cache-read / cache-creation, plus cost estimate per your configured pricing
-- **Tool calls**: total, breakdown by tool name, last tool used
-- **Thinking** flag if extended thinking is active
-- **Files**: cwd changes in the last N minutes (configurable)
-- **Git**: branch + dirty status
+**Process**
+- PID, cwd, duration, CPU%, memory
+- Status: working / waiting / idle (heuristic from CPU + log activity)
+- Model + permission mode (from cmdline flags + log)
+- Thinking flag, when extended thinking is active
 
-Plus 24h history of ended sessions, and aggregate stats (token totals, cost,
-average duration).
+**Location**
+- iTerm window/tab, tmux session/window/pane, or `headless`
+
+**Activity**
+- Tool calls — total, breakdown by name, last tool used
+- Subagent invocations and current in-flight task
+
+**Cost**
+- Token usage: input / output / cache-read / cache-creation
+- Cost estimate per the configured pricing (hidden when `plan ≠ api`)
+
+**Files**
+- Recent file changes inside the session's cwd (configurable retention)
+- Per-file `git diff` from the Files tab
+
+**Git**
+- Branch + dirty status
+
+Plus 24h history of ended sessions and hourly time-series charts.
+
+## Screenshots
+
+> Screenshots are tracked separately — drop new PNGs under `docs/img/` and
+> reference them here.
+
+- Dashboard overview — `docs/img/dashboard.png`
+- Per-session detail panel — `docs/img/detail.png`
+- Files diff view — `docs/img/files-diff.png`
+- Menu bar tray — `docs/img/tray.png`
 
 ## Actions
 
@@ -31,9 +69,9 @@ average duration).
 - **Halt** (SIGINT) with confirmation
 - **+ New session** in a new iTerm window or tab, with flag whitelist + cwd
   sandboxing
+- **Send text** to a running session — opt-in via Settings → Remote Control
 
-Sending input to an existing session, killing with SIGKILL, and bulk
-operations are intentionally not supported (read-only-ish design).
+Killing with SIGKILL and bulk operations are intentionally not supported.
 
 ## Install
 
@@ -42,7 +80,7 @@ operations are intentionally not supported (read-only-ish design).
 Download the latest `ClaudeWatch.dmg` from
 [Releases](https://github.com/OmerYasirOnal/claudewatch/releases), mount it,
 and drag `ClaudeWatch.app` into your `Applications` folder. Double-click to
-launch — the 🐜 icon appears in your menu bar.
+launch — the icon appears in your menu bar.
 
 Bundles a portable Python 3.12 + the backend, so you don't need to install
 anything else. ~78 MB on disk. macOS 14 (Sonoma) or newer required.
@@ -53,7 +91,7 @@ details.
 ### Option 2 — Python install (for development / CLI)
 
 ```bash
-git clone https://github.com/<you>/claudewatch.git
+git clone https://github.com/OmerYasirOnal/claudewatch.git
 cd claudewatch
 ./scripts/install.sh
 ```
@@ -127,9 +165,7 @@ common issues.
 - Cross-machine monitoring
 - Linux / Windows
 - Conversation content search or message threading
-- Notifications / alerts
 - Direct Anthropic API access — costs are computed locally from log usage fields
-- Sending input to existing sessions
 - Bulk operations (focus/halt/new are one session at a time)
 
 ## License

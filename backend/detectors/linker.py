@@ -132,11 +132,24 @@ async def build_sessions(
     iterm_loc_map: dict[int, ItermLocation] | None = None,
     iterm_tty_map: dict[int, ItermTtyLocation] | None = None,
 ) -> list[ClaudeSession]:
-    """Build the current session snapshot.
+    """Build the current session snapshot by running the detector pipeline.
 
-    iTerm lookups are NOT performed here — they're driven on a separate
-    cadence by the iTerm scheduler in `server.py` and passed in via the
-    `iterm_loc_map` / `iterm_tty_map` parameters.
+    Inputs:
+        config: live config dict (pricing, retention, etc.).
+        state: persistent ``LinkerState`` (cpu history + log/git caches
+            survive across ticks).
+        watcher: optional ``FilesystemWatcher`` for recent file changes
+            per-cwd.
+        iterm_loc_map / iterm_tty_map: pre-populated by the dedicated
+            iTerm refresh loop in ``server.py`` so this function does NOT
+            talk to iTerm itself — keeps the main scheduler off the iTerm
+            WebSocket on every tick (#2, #21).
+
+    Pipeline per tick:
+        scan_claude_processes → link_pids_to_tmux + apply iterm maps →
+        parse_log (mtime-cached) → annotate cost via pricing →
+        get_git_context (10s TTL cache) → FilesystemWatcher.get_recent →
+        assemble ``ClaudeSession``.
     """
     # Re-resolve log_dir whenever it's not a valid dir — covers the case where
     # Claude Code wasn't installed when the daemon started but has since been

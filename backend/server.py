@@ -1,3 +1,18 @@
+"""FastAPI app + the two async scheduler loops that drive ClaudeWatch.
+
+The lifespan brings up a single ``AppState`` (in-memory snapshot, SQLite
+connection, filesystem watcher, iTerm connection manager, SSE fan-out
+queues) and starts two background tasks:
+
+* ``_scheduler_loop`` — main detector pass; runs every
+  ``process_scan_interval_seconds`` (default 2s).
+* ``_iterm_refresh_loop`` — refreshes the cached iTerm session maps on a
+  slower cadence so the main loop never has to touch iTerm itself.
+
+See ``docs/architecture.md`` for the full pipeline and why the loops are
+split.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -368,6 +383,12 @@ async def _maybe_prune(s: AppState) -> None:
 
 
 async def _scheduler_loop(s: AppState) -> None:
+    """Main detector pass — runs forever, every ``process_scan_interval_seconds``.
+
+    Builds a fresh ``ClaudeSession`` list via ``build_sessions``, diffs it
+    against ``s.sessions``, broadcasts started/updated/ended events, syncs
+    the filesystem watcher, and triggers periodic SQLite pruning.
+    """
     interval = _safe_float(s.config.get("process_scan_interval_seconds", 2), default=2.0)
     while True:
         try:
