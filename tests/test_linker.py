@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -7,11 +9,13 @@ from unittest.mock import patch
 import pytest
 
 from backend.config import DEFAULT_CONFIG
+from backend.detectors.conversation_log import ParsedLog
 from backend.detectors.iterm_applescript import ItermTtyLocation
 from backend.detectors.iterm_detector import ItermLocation
-from backend.detectors.linker import LinkerState, build_sessions
-from backend.detectors.process_detector import ProcInfo
+from backend.detectors.linker import LinkerState, _prune_caches, build_sessions
+from backend.detectors.process_detector import CpuHistory, ProcInfo
 from backend.detectors.tmux_detector import TmuxLocation
+from backend.models import TokenUsage
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -163,7 +167,9 @@ async def test_build_sessions_consumes_iterm_tty_map_arg(isolated_log_dir):
     state = LinkerState()
     state.log_dir = log_dir
     tty_map = {
-        6666: ItermTtyLocation(window_id=7, tab_index=3, tty="/dev/ttys000", unique_id="u-1", name="tab-name")
+        6666: ItermTtyLocation(
+            window_id="7", tab_index=3, tty="/dev/ttys000", unique_id="u-1", name="tab-name"
+        )
     }
 
     with (
@@ -174,13 +180,54 @@ async def test_build_sessions_consumes_iterm_tty_map_arg(isolated_log_dir):
 
     s = sessions[0]
     assert s.location_type == "iterm"
-    # Model field is str | None now (#22). AppleScript fallback supplies int from
-    # `id of window` AppleScript output; linker stringifies on the way in.
+    # SessionStatus.iterm_window_id is str | None (#22). The AppleScript fallback
+    # also stores window_id as a str now (#36) — no bridging needed in the linker.
     assert s.iterm_window_id == "7"
     assert s.iterm_tab_index == 3
     assert s.iterm_tty == "/dev/ttys000"
     assert s.iterm_session_id == "u-1"
     assert s.iterm_tab_title == "tab-name"
+
+
+def test_prune_caches_evicts_dead_cwds(tmp_path):
+    """#48: a long-running daemon must not retain git_cache/log_cache/cpu_history
+    entries for processes and cwds that no longer exist."""
+    state = LinkerState()
+    # Two cwds in git_cache — only "alive" should survive.
+    state.git_cache["/alive/cwd"] = (123.0, None)
+    state.git_cache["/dead/cwd"] = (456.0, None)
+    # Two pids in cpu_history — only 1 should survive.
+    state.cpu_history[1] = CpuHistory()
+    state.cpu_history[99] = CpuHistory()
+    # Two log_cache entries — "fresh" file should survive, "stale" should be dropped.
+    fresh = tmp_path / "fresh.jsonl"
+    fresh.write_text("{}\n")
+    stale = tmp_path / "stale.jsonl"
+    stale.write_text("{}\n")
+    # Backdate the stale file's mtime to 20 minutes ago — past the 10 min cutoff.
+    twenty_min_ago = time.time() - 1200
+    os.utime(stale, (twenty_min_ago, twenty_min_ago))
+    fresh_pl = ParsedLog(conversation_id="fresh", log_path=fresh, usage=TokenUsage())
+    stale_pl = ParsedLog(conversation_id="stale", log_path=stale, usage=TokenUsage())
+    state.log_cache[fresh] = (fresh.stat().st_mtime, fresh_pl)
+    state.log_cache[stale] = (twenty_min_ago, stale_pl)
+
+    _prune_caches(state, alive_pids={1}, alive_cwds={"/alive/cwd"})
+
+    assert set(state.git_cache.keys()) == {"/alive/cwd"}
+    assert set(state.cpu_history.keys()) == {1}
+    assert set(state.log_cache.keys()) == {fresh}
+
+
+def test_prune_caches_drops_log_cache_entries_for_deleted_files(tmp_path):
+    """log_cache entries pointing at files that no longer exist must be evicted
+    even if their cached mtime would otherwise be considered fresh."""
+    state = LinkerState()
+    ghost = tmp_path / "ghost.jsonl"
+    ghost_pl = ParsedLog(conversation_id="ghost", log_path=ghost, usage=TokenUsage())
+    state.log_cache[ghost] = (time.time(), ghost_pl)  # never created
+    _prune_caches(state, alive_pids=set(), alive_cwds=set())
+    assert ghost not in state.log_cache
 
 
 async def test_build_sessions_no_log_gracefully(tmp_path):

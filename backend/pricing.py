@@ -8,7 +8,10 @@ def estimate_cost(
     usage: TokenUsage,
     pricing: dict[str, dict[str, float]],
 ) -> float | None:
-    if not model:
+    # Guard against non-string model keys (e.g. user typo writes a list/dict
+    # into the pricing config, or a parser hands us something exotic). dict.get
+    # would raise TypeError("unhashable type") on every scheduler tick.
+    if not isinstance(model, str) or not model:
         return None
     rates = pricing.get(model)
     if not rates:

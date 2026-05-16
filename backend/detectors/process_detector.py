@@ -42,14 +42,21 @@ VALUE_TAKING_FLAGS = {
 }
 
 
+def _info_or_call(proc: psutil.Process, key: str, caller):
+    """Read pre-fetched proc.info[key] if available (cheap, populated by
+    process_iter([...])), else fall back to caller() which performs a syscall.
+    Lets is_claude_process skip ~2 syscalls per candidate during a scan (#50)."""
+    info = getattr(proc, "info", None)
+    if info is not None and key in info:
+        return info[key]
+    return caller()
+
+
 def is_claude_process(proc: psutil.Process, current_user: str) -> bool:
     try:
-        if proc.username() != current_user:
+        if _info_or_call(proc, "username", proc.username) != current_user:
             return False
-    except (psutil.AccessDenied, psutil.NoSuchProcess):
-        return False
-    try:
-        cmdline = proc.cmdline() or []
+        cmdline = _info_or_call(proc, "cmdline", proc.cmdline) or []
     except (psutil.AccessDenied, psutil.NoSuchProcess):
         return False
     if not cmdline:
@@ -125,11 +132,22 @@ class ProcInfo:
 def scan_claude_processes() -> list[ProcInfo]:
     user = getpass.getuser()
     out: list[ProcInfo] = []
+    # process_iter pre-fetches these attrs in one batched syscall per process;
+    # we re-read them via proc.info below instead of issuing fresh syscalls.
+    # Saves ~2 syscalls per candidate and ~3 syscalls per real Claude proc per
+    # scheduler tick on busy systems (#50).
     for proc in psutil.process_iter(["pid", "ppid", "name", "cmdline", "username", "create_time"]):
         try:
             if not is_claude_process(proc, user):
                 continue
-            cmdline = proc.cmdline() or []
+            info = proc.info
+            cmdline = info.get("cmdline") or []
+            ppid = info.get("ppid")
+            if ppid is None:
+                ppid = proc.ppid()
+            create_time = info.get("create_time")
+            if create_time is None:
+                create_time = proc.create_time()
             cwd = None
             try:
                 cwd = proc.cwd()
@@ -146,9 +164,9 @@ def scan_claude_processes() -> list[ProcInfo]:
             out.append(
                 ProcInfo(
                     pid=proc.pid,
-                    ppid=proc.ppid(),
+                    ppid=ppid,
                     cwd=cwd,
-                    started_at=datetime.fromtimestamp(proc.info["create_time"], tz=UTC),
+                    started_at=datetime.fromtimestamp(create_time, tz=UTC),
                     cpu_percent=float(cpu),
                     memory_mb=float(mem),
                     cmdline=cmdline,

@@ -68,6 +68,9 @@ class FilesystemWatcher:
                 await asyncio.wait_for(task, timeout=2.0)
             except (TimeoutError, asyncio.CancelledError):
                 task.cancel()
+        # Drop accumulated changes for cwds we no longer watch (#48). Without
+        # this, self.changes grows unbounded across the daemon's lifetime.
+        self.changes.pop(cwd, None)
 
     async def stop_all(self) -> None:
         for cwd in list(self._tasks.keys()):

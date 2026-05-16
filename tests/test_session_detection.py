@@ -105,3 +105,28 @@ def test_live_detection_finds_at_least_self_when_running():
     for p in out:
         assert p.pid > 0
         assert isinstance(p.cmdline, list)
+
+
+def test_is_claude_process_uses_info_cache():
+    """#50: when proc.info is pre-populated (the process_iter path), is_claude_process
+    must read from it rather than making fresh username()/cmdline() syscalls.
+    Asserts no calls were made on the underlying methods."""
+    p = MagicMock(spec=psutil.Process)
+    p.info = {"username": USER, "cmdline": ["/Users/me/.local/bin/claude"]}
+    # Don't pre-set return_value — any call should be a regression.
+    assert is_claude_process(p, USER) is True
+    assert p.username.call_count == 0
+    assert p.cmdline.call_count == 0
+
+
+def test_is_claude_process_falls_back_when_info_missing():
+    """When proc.info wasn't pre-populated (callers using is_claude_process directly
+    on a bare psutil.Process), we still need the live syscall fallback."""
+    p = MagicMock(spec=psutil.Process)
+    # MagicMock(spec=...) doesn't auto-create `.info`; emulate the bare-Process case.
+    p.info = {}
+    p.username.return_value = USER
+    p.cmdline.return_value = ["/Users/me/.local/bin/claude"]
+    assert is_claude_process(p, USER) is True
+    assert p.username.call_count == 1
+    assert p.cmdline.call_count == 1
