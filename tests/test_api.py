@@ -129,6 +129,125 @@ def test_config_get_and_post_roundtrip(populated_app, tmp_path, monkeypatch):
     assert r2.json()["port"] == 7799
 
 
+def test_post_config_rejects_unknown_keys(populated_app, tmp_path, monkeypatch):
+    """#41: extra='forbid' rejects keys outside the whitelist (e.g. an attacker
+    trying to plant random config that future code might honor)."""
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    r = client.post("/api/config", json={"sneaky_field": "x"})
+    assert r.status_code == 422
+
+
+def test_post_config_clamps_ranges_low_port(populated_app, tmp_path, monkeypatch):
+    """#41: port < 1024 (privileged range) is rejected so callers can't
+    redirect us onto e.g. port 80."""
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    r = client.post("/api/config", json={"port": 80})
+    assert r.status_code == 422
+
+
+def test_post_config_clamps_ranges_high_port(populated_app, tmp_path, monkeypatch):
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    r = client.post("/api/config", json={"port": 70000})
+    assert r.status_code == 422
+
+
+def test_post_config_accepts_known_keys(populated_app, tmp_path, monkeypatch):
+    """Sanity: the whitelist still accepts every legitimate field."""
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    body = {
+        "port": 7799,
+        "read_only": True,
+        "privacy_mode": False,
+        "show_log_text": True,
+        "file_change_retention_minutes": 30,
+        "process_scan_interval_seconds": 1.5,
+        "iterm_refresh_interval_seconds": 4.0,
+        "ignore_patterns": ["*.bak"],
+    }
+    r = client.post("/api/config", json=body)
+    assert r.status_code == 200
+    out = r.json()
+    for k, v in body.items():
+        assert out[k] == v
+
+
+def test_post_pricing_rejects_string_rate(populated_app, tmp_path, monkeypatch):
+    """#30 / #41: a pricing rate of "abc" must be 422, not silently accepted."""
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    r = client.post(
+        "/api/pricing",
+        json={
+            "claude-opus-4-7": {
+                "input": "abc",
+                "output": 75.0,
+                "cache_read": 1.5,
+                "cache_write": 18.75,
+            }
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_post_pricing_rejects_negative_rate(populated_app, tmp_path, monkeypatch):
+    """#41: negative pricing values are nonsense — must 422."""
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    r = client.post(
+        "/api/pricing",
+        json={
+            "claude-opus-4-7": {
+                "input": -1.0,
+                "output": 75.0,
+                "cache_read": 1.5,
+                "cache_write": 18.75,
+            }
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_post_pricing_accepts_valid_payload(populated_app, tmp_path, monkeypatch):
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    payload = {
+        "claude-opus-4-7": {
+            "input": 15.0,
+            "output": 75.0,
+            "cache_read": 1.5,
+            "cache_write": 18.75,
+        }
+    }
+    r = client.post("/api/pricing", json=payload)
+    assert r.status_code == 200
+    assert r.json()["claude-opus-4-7"]["input"] == 15.0
+
+
 def test_history_returns_empty_initially(populated_app):
     client, _, _ = populated_app
     r = client.get("/api/history")
