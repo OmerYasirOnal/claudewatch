@@ -197,6 +197,45 @@ class ItermConnectionManager:
                         return True
         return False
 
+    async def send_text(self, session_id: str, text: str, timeout: float = 3.0) -> bool:
+        """Send text to the iTerm session whose ``session_id`` matches.
+
+        Used by the remote-control POST /api/sessions/{pid}/send-text endpoint.
+        Reuses the persistent Python API connection (same backoff semantics as
+        ``get_sessions`` and ``focus_session``). Returns True iff the session
+        was found AND ``async_send_text`` completed without raising.
+        """
+        if not _ITERM2_AVAILABLE:
+            return False
+        now = time.time()
+        if self._conn is None and (now - self._last_error_at) < _RECONNECT_BACKOFF_SECONDS:
+            return False
+        if not await self._ensure_connection(timeout):
+            return False
+        try:
+            return await asyncio.wait_for(self._send_text(session_id, text), timeout=timeout)
+        except (TimeoutError, Exception) as e:  # noqa: BLE001
+            log.debug("iTerm send_text failed, dropping connection: %s", e)
+            await self._drop_connection()
+            self._last_error_at = time.time()
+            return False
+
+    async def _send_text(self, session_id: str, text: str) -> bool:
+        assert self._conn is not None
+        app = await iterm2.async_get_app(self._conn)
+        if app is None:
+            return False
+        for window in app.windows:
+            for tab in window.tabs:
+                for session in tab.sessions:
+                    if str(session.session_id) == session_id:
+                        # iterm2.Session.async_send_text(text: str) — single
+                        # positional str arg, no submit/newline kwarg. Callers
+                        # that want submission must append "\n" themselves.
+                        await session.async_send_text(text)
+                        return True
+        return False
+
     async def close(self) -> None:
         async with self._conn_lock:
             await self._drop_connection()

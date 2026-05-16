@@ -18,8 +18,21 @@ def _safe_as(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-async def notify(title: str, message: str, subtitle: str = "") -> None:
-    """Show a macOS notification via osascript. Best-effort; never raises."""
+async def notify(
+    title: str,
+    message: str,
+    subtitle: str = "",
+    group: str | None = None,
+) -> None:
+    """Show a macOS notification via osascript. Best-effort; never raises.
+
+    The ``group`` parameter is accepted for future grouping support but is
+    currently ignored — `osascript` does not expose a native notification
+    group/thread identifier (the `display notification` verb only supports
+    title/subtitle/sound). It's wired through the public API so callers can
+    start tagging notifications today without a follow-up signature change.
+    """
+    del group  # currently ignored, see docstring
     title_s = _safe_as(title)
     message_s = _safe_as(message)
     subtitle_s = _safe_as(subtitle)

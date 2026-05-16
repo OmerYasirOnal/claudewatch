@@ -495,6 +495,165 @@ def test_focus_uses_iterm_manager_when_session_id_present(populated_app, monkeyp
     fake_mgr.focus_session.assert_awaited_once_with("iterm-sess-xyz")
 
 
+def test_send_text_403_when_disabled(populated_app):
+    """Default config has remote_control.enabled=False — POST must 403."""
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "sess-xyz"
+    fastapi_app.state.s.config.setdefault("remote_control", {})["enabled"] = False
+    r = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "hello"},
+    )
+    assert r.status_code == 403
+    assert "remote control" in r.json()["detail"].lower()
+
+
+def test_send_text_works_when_enabled(populated_app):
+    """With remote_control.enabled=True the endpoint forwards to iterm_manager
+    and returns success + bytes_sent (including the trailing newline)."""
+    from unittest.mock import AsyncMock
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "iterm-sess-zzz"
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+
+    fake_mgr = AsyncMock()
+    fake_mgr.send_text = AsyncMock(return_value=True)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+
+    r = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "hello", "submit": True},
+    )
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    assert body["success"] is True
+    # "hello" + "\n" = 6 bytes
+    assert body["bytes_sent"] == 6
+    fake_mgr.send_text.assert_awaited_once_with("iterm-sess-zzz", "hello\n")
+
+
+def test_send_text_no_submit_omits_newline(populated_app):
+    from unittest.mock import AsyncMock
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "iterm-sess-zzz"
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+
+    fake_mgr = AsyncMock()
+    fake_mgr.send_text = AsyncMock(return_value=True)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+
+    r = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "hi", "submit": False},
+    )
+    assert r.status_code == 200
+    fake_mgr.send_text.assert_awaited_once_with("iterm-sess-zzz", "hi")
+
+
+def test_send_text_caps_length(populated_app):
+    """Payloads above the 4096-char cap must 413, not be forwarded."""
+    from unittest.mock import AsyncMock
+
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "iterm-sess-zzz"
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+    fake_mgr = AsyncMock()
+    fake_mgr.send_text = AsyncMock(return_value=True)
+    fastapi_app.state.s.iterm_manager = fake_mgr
+
+    r = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "x" * 4097},
+    )
+    assert r.status_code == 413
+    fake_mgr.send_text.assert_not_awaited()
+
+
+def test_send_text_400_when_no_iterm_session_id(populated_app):
+    """No iTerm linkage → 400 (we can't route the text anywhere useful)."""
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = None
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+
+    r = client.post(
+        f"/api/sessions/{sess.pid}/send-text",
+        json={"text": "hello"},
+    )
+    assert r.status_code == 400
+
+
+def test_send_text_404_for_unknown_pid(populated_app):
+    client, fastapi_app, _ = populated_app
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+    r = client.post("/api/sessions/99999/send-text", json={"text": "x"})
+    assert r.status_code == 404
+
+
+def test_send_text_read_only_blocks(populated_app):
+    client, fastapi_app, sess = populated_app
+    sess.iterm_session_id = "x"
+    fastapi_app.state.s.config["remote_control"] = {"enabled": True}
+    fastapi_app.state.s.config["read_only"] = True
+    r = client.post(f"/api/sessions/{sess.pid}/send-text", json={"text": "x"})
+    assert r.status_code == 403
+
+
+def test_log_stream_returns_404_for_unknown_pid(populated_app):
+    client, _, _ = populated_app
+    r = client.get("/api/sessions/99999/log-stream")
+    assert r.status_code == 404
+
+
+def test_log_stream_returns_404_when_no_log_path(populated_app):
+    client, _, sess = populated_app
+    sess.conversation_log_path = None
+    r = client.get(f"/api/sessions/{sess.pid}/log-stream")
+    assert r.status_code == 404
+
+
+def test_log_stream_initial_snapshot_event(populated_app, tmp_path):
+    """Smoke-test the SSE generator directly: opening the stream emits a
+    ``snapshot`` event with the file's existing entries.
+
+    We don't drive this through the TestClient because httpx's sync streaming
+    doesn't cooperate well with an async generator that polls forever — the
+    snapshot logic is the load-bearing part anyway, so we exercise it
+    in-process by stepping the async generator once."""
+    import asyncio
+    import json as _json
+    from unittest.mock import AsyncMock, MagicMock
+
+    from backend.api.sessions import stream_log_tail
+
+    client, fastapi_app, sess = populated_app  # noqa: F841 — fixture also sets up app state
+    fastapi_app.state.s.config["show_log_text"] = True
+    log = tmp_path / "stream.jsonl"
+    log.write_text('{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n')
+    sess.conversation_log_path = str(log)
+
+    fake_req = MagicMock()
+    fake_req.app = fastapi_app
+    fake_req.is_disconnected = AsyncMock(return_value=True)
+
+    async def _run():
+        resp = await stream_log_tail(sess.pid, fake_req)
+        # Pull just the first yielded chunk — the initial snapshot event.
+        agen = resp.body_iterator
+        first = await agen.__anext__()
+        await agen.aclose()
+        return first
+
+    first = asyncio.run(_run())
+    if isinstance(first, bytes):
+        first = first.decode("utf-8")
+    assert "event: snapshot" in first
+    payload = first.split("data: ", 1)[1].strip()
+    data = _json.loads(payload)
+    assert data["entries"][0]["message"]["content"][0]["text"] == "hi"
+
+
 def test_focus_falls_back_to_applescript_when_manager_returns_false(populated_app, monkeypatch):
     """#24: when focus_session returns False, /focus must fall through to the
     existing AppleScript paths."""

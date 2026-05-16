@@ -14,7 +14,7 @@ import psutil
 from fastapi import APIRouter, HTTPException, Request
 
 from backend.detectors.process_detector import VALUE_TAKING_FLAGS, is_claude_process
-from backend.models import NewSessionRequest
+from backend.models import NewSessionRequest, SendTextRequest
 
 router = APIRouter(prefix="/api")
 log = logging.getLogger(__name__)
@@ -24,6 +24,11 @@ APPLESCRIPT_DIR = Path(__file__).resolve().parent.parent / "applescript"
 # A flag is `--name` or `--name=value`. Names: lowercase + digits + dash, must start lowercase.
 SAFE_FLAG_RE = re.compile(r"^--[a-z][a-z0-9-]*(=[A-Za-z0-9._/=:,@-]+)?$")
 UNSAFE_VALUE_CHARS = (";", "&", "|", "`", "$", "\n", "\r", ">", "<", "\\", "\x00")
+
+# Hard cap on /send-text payloads. The endpoint hands raw text to iTerm's
+# `async_send_text`, which would happily forward megabytes — bound it well below
+# anything a human would type so a stuck client can't flood the target session.
+SEND_TEXT_MAX_CHARS = 4096
 
 
 def _state(request: Request):
@@ -231,3 +236,49 @@ async def focus(pid: int, request: Request):
     except subprocess.TimeoutExpired:
         raise HTTPException(500, "focus action timed out")
     return {"success": True}
+
+
+@router.post("/sessions/{pid}/send-text")
+async def send_text(pid: int, body: SendTextRequest, request: Request):
+    """Type ``body.text`` into the iTerm session backing this Claude PID.
+
+    Opt-in: requires ``config.remote_control.enabled = True``. The dashboard's
+    Settings page surfaces a toggle; until it's flipped we 403 so a typo in the
+    URL bar can't push text into a running session.
+    """
+    _check_read_only(request)
+    s = _state(request)
+    remote_cfg = s.config.get("remote_control", {}) or {}
+    if not remote_cfg.get("enabled", False):
+        raise HTTPException(403, "remote control is disabled; enable in settings")
+    sess = s.sessions.get(pid)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if not sess.iterm_session_id:
+        raise HTTPException(400, "session has no iTerm linkage")
+
+    text = body.text
+    if len(text) > SEND_TEXT_MAX_CHARS:
+        raise HTTPException(413, f"text exceeds {SEND_TEXT_MAX_CHARS}-character limit")
+
+    iterm_manager = getattr(s, "iterm_manager", None)
+    if iterm_manager is None:
+        raise HTTPException(503, "iTerm manager unavailable")
+
+    # Build the payload up-front so the byte count we log + return reflects
+    # exactly what was sent to iTerm (including the trailing newline).
+    payload = text + ("\n" if body.submit else "")
+    log.info(
+        "remote send-text to PID %d session %s: %d chars",
+        pid,
+        sess.iterm_session_id,
+        len(payload),
+    )
+    try:
+        ok = await iterm_manager.send_text(sess.iterm_session_id, payload)
+    except Exception as e:  # noqa: BLE001
+        log.error("send_text raised: %s", e)
+        raise HTTPException(500, f"send_text failed: {e}")
+    if not ok:
+        raise HTTPException(502, "iTerm did not accept the text (session not found or API error)")
+    return {"success": True, "bytes_sent": len(payload)}

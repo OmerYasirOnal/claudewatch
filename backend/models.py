@@ -125,6 +125,13 @@ class NewSessionRequest(BaseModel):
     command: str = "claude"
 
 
+class SendTextRequest(BaseModel):
+    text: str
+    # If True (default), append "\n" so the line is actually submitted in
+    # the target Claude REPL rather than left sitting in the input buffer.
+    submit: bool = True
+
+
 class HealthReport(BaseModel):
     iterm_api: bool
     automation: bool

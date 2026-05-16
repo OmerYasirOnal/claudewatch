@@ -24,6 +24,14 @@ class PricingEntry(BaseModel):
     cache_write: float = Field(ge=0)
 
 
+class RemoteControlUpdate(BaseModel):
+    # Sub-block so callers can flip remote_control.enabled without touching
+    # other top-level config. extra="forbid" keeps the surface tight.
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+
+
 class ConfigUpdate(BaseModel):
     # extra="forbid": unknown keys -> 422. Prevents a localhost attacker (or a
     # DNS-rebound page; see #39) from planting random config keys that future
@@ -39,6 +47,7 @@ class ConfigUpdate(BaseModel):
     iterm_refresh_interval_seconds: float | None = Field(default=None, gt=0, le=60)
     ignore_patterns: list[str] | None = None
     pricing: dict[str, PricingEntry] | None = None
+    remote_control: RemoteControlUpdate | None = None
 
 
 @router.get("/config")
