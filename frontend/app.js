@@ -5,7 +5,7 @@ function appRoot() {
     history: [],
     stats: {},
     health: { iterm_api: null, tmux_available: null, log_dir_found: null, issues: [] },
-    config: { pricing: {}, notifications: {}, remote_control: { enabled: false } },
+    config: { pricing: {}, notifications: {}, remote_control: { enabled: false }, plan: "api", editor: { enabled: false, command: "code" } },
     filter: "All",
     filters: ["All", "iTerm", "Tmux", "Headless", "Working", "Idle", "High-cost", "Bookmarked"],
     detailPid: null,
@@ -67,6 +67,27 @@ function appRoot() {
     // F8 - density
     density: "comfortable",
 
+    // Files tab
+    fileChanges: [],
+    fileChangesError: null,
+    fileChangesUnavailable: false,
+    filesMinutes: 10,
+    filesKindFilter: "All",
+    filesSearch: "",
+    filesLastRefresh: null,
+    filesSelected: null,         // { cwd, path } currently shown in side panel
+    filesDiff: null,             // diff payload
+    filesDiffError: null,
+    filesDiffLoading: false,
+    filesPidFilter: null,        // optional PID filter (deeplink from card)
+    _filesTimer: null,
+    _editorOpenStatus: null,     // transient string for "Open in editor" outcome
+
+    // Tile mode
+    tileMode: false,
+    tilePreviews: {},            // pid -> { entries, error }
+    _tileTimer: null,
+
     async init() {
       this._loadLocalPrefs();
       this._applyAppearance();
@@ -79,6 +100,8 @@ function appRoot() {
       setInterval(() => this.loadHealth(), 30000);
       // Watch insights view
       this.$watch && this.$watch('view', (v) => this._onViewChange(v));
+      // Trigger initial tile polling if persisted as on
+      this._restartTileTimer();
     },
 
     _loadLocalPrefs() {
@@ -120,6 +143,17 @@ function appRoot() {
           if (parsed && typeof parsed === "object") this.expandedSubagents = parsed;
         }
       } catch (e) { /* ignore */ }
+      try {
+        const tm = localStorage.getItem("claudewatch.tileMode");
+        if (tm === "1" || tm === "true") this.tileMode = true;
+      } catch (e) { /* ignore */ }
+    },
+
+    saveTileMode() {
+      try { localStorage.setItem("claudewatch.tileMode", this.tileMode ? "1" : "0"); }
+      catch (e) { /* ignore */ }
+      // Restart polling for the current visibility
+      this._restartTileTimer();
     },
 
     saveCardVisibility() {
@@ -216,13 +250,23 @@ function appRoot() {
         r = await fetch("/api/config");
         if (r.ok) {
           this.config = await r.json();
-          if (!this.config.notifications) this.config.notifications = {};
-          if (!this.config.remote_control) this.config.remote_control = { enabled: false };
+          this._normalizeConfig();
           this.chatRemoteEnabled = !!(this.config.remote_control && this.config.remote_control.enabled);
           return;
         }
       } catch (e) { /* ignore */ }
       this._setError(`Failed to load /api/config: HTTP ${r?.status ?? '???'}`);
+    },
+    _normalizeConfig() {
+      if (!this.config.notifications) this.config.notifications = {};
+      if (!this.config.remote_control) this.config.remote_control = { enabled: false };
+      if (!this.config.plan) this.config.plan = "api";
+      if (!this.config.editor) this.config.editor = { enabled: false, command: "code" };
+      if (typeof this.config.editor.enabled !== "boolean") this.config.editor.enabled = false;
+      if (!this.config.editor.command) this.config.editor.command = "code";
+    },
+    showCost() {
+      return (this.config?.plan ?? "api") === "api";
     },
     async saveConfig(updates) {
       try {
@@ -233,11 +277,17 @@ function appRoot() {
         });
         if (r.ok) {
           this.config = await r.json();
-          if (!this.config.notifications) this.config.notifications = {};
-          if (!this.config.remote_control) this.config.remote_control = { enabled: false };
+          this._normalizeConfig();
           this.chatRemoteEnabled = !!(this.config.remote_control && this.config.remote_control.enabled);
         }
       } catch (e) { console.warn("save config failed", e); }
+    },
+    async saveEditorConfig() {
+      const e = this.config.editor || { enabled: false, command: "code" };
+      await this.saveConfig({ editor: {
+        enabled: !!e.enabled,
+        command: (e.command || "code").trim() || "code",
+      }});
     },
     async saveRemoteControl() {
       const enabled = !!(this.config.remote_control && this.config.remote_control.enabled);
@@ -298,6 +348,209 @@ function appRoot() {
         if (this._insightsTimer) { clearInterval(this._insightsTimer); this._insightsTimer = null; }
       }
       if (v === "history") this.loadHistory();
+      if (v === "files") {
+        this.loadFileChanges();
+        if (this._filesTimer) clearInterval(this._filesTimer);
+        this._filesTimer = setInterval(() => this.loadFileChanges(), 5000);
+      } else {
+        if (this._filesTimer) { clearInterval(this._filesTimer); this._filesTimer = null; }
+      }
+      // Restart tile polling depending on dashboard+tile mode
+      this._restartTileTimer();
+    },
+
+    // --- Files tab ---
+    async loadFileChanges() {
+      const mins = Number(this.filesMinutes) || 10;
+      let r;
+      try {
+        r = await fetch(`/api/file-changes?minutes=${mins}`);
+        if (r.status === 404) {
+          this.fileChangesUnavailable = true;
+          this.fileChanges = [];
+          this.filesLastRefresh = new Date().toISOString();
+          return;
+        }
+        if (r.ok) {
+          const data = await r.json();
+          this.fileChanges = Array.isArray(data) ? data : (data.changes || []);
+          this.fileChangesUnavailable = false;
+          this.fileChangesError = null;
+          this.filesLastRefresh = new Date().toISOString();
+          return;
+        }
+      } catch (e) {
+        this.fileChangesError = "Network error loading file changes";
+        return;
+      }
+      this.fileChangesError = `Failed to load /api/file-changes: HTTP ${r?.status ?? '???'}`;
+    },
+    visibleFileChanges() {
+      const q = (this.filesSearch || "").trim().toLowerCase();
+      const kind = this.filesKindFilter;
+      const pidFilter = this.filesPidFilter;
+      let arr = [...(this.fileChanges || [])];
+      if (kind && kind !== "All") {
+        const want = kind.toLowerCase();
+        arr = arr.filter((c) => (c.kind || "").toLowerCase() === want);
+      }
+      if (q) {
+        arr = arr.filter((c) => {
+          const hay = `${c.path || ""} ${c.abs_path || ""} ${c.project || ""} ${c.cwd || ""}`.toLowerCase();
+          return hay.includes(q);
+        });
+      }
+      if (pidFilter != null) {
+        arr = arr.filter((c) => Array.isArray(c.session_pids) && c.session_pids.includes(pidFilter));
+      }
+      arr.sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
+      return arr;
+    },
+    fileChangeKindIcon(kind) {
+      const k = (kind || "").toLowerCase();
+      if (k === "created" || k === "added") return "+";
+      if (k === "deleted" || k === "removed") return "−";
+      if (k === "modified" || k === "changed") return "✎";
+      return "•";
+    },
+    fileChangeKindColor(kind) {
+      const k = (kind || "").toLowerCase();
+      if (k === "created" || k === "added") return "text-emerald-300";
+      if (k === "deleted" || k === "removed") return "text-rose-300";
+      if (k === "modified" || k === "changed") return "text-amber-300";
+      return "text-zinc-400";
+    },
+    selectFileChange(change) {
+      if (!change) return;
+      this.filesSelected = { cwd: change.cwd, path: change.path, project: change.project, abs_path: change.abs_path };
+      this.loadDiff();
+    },
+    closeFileDiff() {
+      this.filesSelected = null;
+      this.filesDiff = null;
+      this.filesDiffError = null;
+      this._editorOpenStatus = null;
+    },
+    async loadDiff() {
+      if (!this.filesSelected) return;
+      this.filesDiffLoading = true;
+      this.filesDiff = null;
+      this.filesDiffError = null;
+      const q = new URLSearchParams({
+        cwd: this.filesSelected.cwd || "",
+        path: this.filesSelected.path || "",
+        context: "3",
+      });
+      let r;
+      try {
+        r = await fetch(`/api/files/diff?${q.toString()}`);
+        if (r.status === 404) {
+          this.filesDiffError = "Diff endpoint not available yet (backend not merged).";
+          this.filesDiffLoading = false;
+          return;
+        }
+        if (r.ok) {
+          this.filesDiff = await r.json();
+          this.filesDiffLoading = false;
+          return;
+        }
+      } catch (e) {
+        this.filesDiffError = "Network error loading diff";
+        this.filesDiffLoading = false;
+        return;
+      }
+      this.filesDiffError = `Failed to load diff: HTTP ${r?.status ?? '???'}`;
+      this.filesDiffLoading = false;
+    },
+    diffLineClass(line) {
+      if (line.startsWith("+++") || line.startsWith("---")) return "text-zinc-400";
+      if (line.startsWith("@@")) return "text-cyan-300";
+      if (line.startsWith("+")) return "text-emerald-300";
+      if (line.startsWith("-")) return "text-rose-300";
+      return "text-zinc-300";
+    },
+    diffLines(diff) {
+      if (!diff) return [];
+      return String(diff).split("\n");
+    },
+    async openInEditor() {
+      if (!this.filesSelected) return;
+      if (!(this.config.editor && this.config.editor.enabled)) {
+        this._editorOpenStatus = "Enable 'Open in editor' in Settings → Editor first.";
+        return;
+      }
+      this._editorOpenStatus = "Opening…";
+      let r;
+      try {
+        r = await fetch("/api/files/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cwd: this.filesSelected.cwd, path: this.filesSelected.path }),
+        });
+      } catch (e) {
+        this._editorOpenStatus = "Network error";
+        return;
+      }
+      if (r.status === 404) {
+        this._editorOpenStatus = "Open-in-editor endpoint not available yet.";
+        return;
+      }
+      if (r.ok) {
+        this._editorOpenStatus = "Opened";
+        setTimeout(() => { if (this._editorOpenStatus === "Opened") this._editorOpenStatus = null; }, 2000);
+        return;
+      }
+      this._editorOpenStatus = `Failed: HTTP ${r.status}`;
+    },
+    jumpToFilesForSession(sess) {
+      this.filesPidFilter = sess.pid;
+      this.filesSearch = "";
+      this.filesKindFilter = "All";
+      this.view = "files";
+    },
+
+    // --- Tile mode ---
+    _restartTileTimer() {
+      if (this._tileTimer) { clearInterval(this._tileTimer); this._tileTimer = null; }
+      if (this.view === "dashboard" && this.tileMode) {
+        this.refreshTilePreviews();
+        this._tileTimer = setInterval(() => this.refreshTilePreviews(), 5000);
+      }
+    },
+    tileSessions() {
+      const all = this.visibleSessions();
+      // Cap at 6 for performance
+      return all.slice(0, 6);
+    },
+    async refreshTilePreviews() {
+      const tiles = this.tileSessions();
+      const pids = tiles.map((s) => s.pid);
+      // Purge stale
+      for (const pid of Object.keys(this.tilePreviews)) {
+        if (!pids.includes(Number(pid))) delete this.tilePreviews[pid];
+      }
+      await Promise.all(pids.map((pid) => this._fetchTilePreview(pid)));
+    },
+    async _fetchTilePreview(pid) {
+      let r;
+      try {
+        r = await fetch(`/api/sessions/${pid}/log-tail?limit=6`);
+        if (r.ok) {
+          const data = await r.json();
+          const entries = Array.isArray(data) ? data : (data.entries || []);
+          this.tilePreviews[pid] = { entries, error: null };
+          return;
+        }
+      } catch (e) {
+        this.tilePreviews[pid] = { entries: [], error: "network" };
+        return;
+      }
+      this.tilePreviews[pid] = { entries: [], error: `HTTP ${r?.status ?? '???'}` };
+    },
+    tilePreviewEntries(pid) {
+      const p = this.tilePreviews[pid];
+      if (!p) return [];
+      return p.entries || [];
     },
 
     _renderInsightsCharts() {
@@ -763,6 +1016,7 @@ function appRoot() {
       if (this._gPressed && Date.now() - this._gPressedAt < 1200) {
         if (e.key === "i") { this.view = "insights"; this._gPressed = false; e.preventDefault(); return; }
         if (e.key === "d") { this.view = "dashboard"; this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "f") { this.view = "files"; this._gPressed = false; e.preventDefault(); return; }
         if (e.key === "h") { this.view = "history"; this.loadHistory(); this._gPressed = false; e.preventDefault(); return; }
         if (e.key === "s") { this.view = "settings"; this._gPressed = false; e.preventDefault(); return; }
         this._gPressed = false;
