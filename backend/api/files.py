@@ -155,7 +155,13 @@ def _resolve_safe_paths(s, cwd: str, path: str) -> tuple[Path, Path]:
     if path.startswith("/") or ".." in Path(path).parts:
         raise HTTPException(400, "path must be relative and contain no '..' segments")
 
-    candidate = (cwd_path / path).resolve()
+    # #97: Path.resolve() raises RuntimeError on symlink loops (and OSError on
+    # other filesystem errors). Both would otherwise bubble up as a generic 500
+    # — clamp them to a 400 with a clear message instead.
+    try:
+        candidate = (cwd_path / path).resolve()
+    except (OSError, RuntimeError) as e:
+        raise HTTPException(400, f"path resolution failed: {e}") from e
     # Final containment check: candidate must be under cwd_path.
     try:
         candidate.relative_to(cwd_path)

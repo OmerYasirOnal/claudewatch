@@ -254,6 +254,28 @@ def test_file_diff_rejects_path_traversal(app_with_files):
     assert r.status_code == 400
 
 
+def test_files_diff_handles_symlink_loop(app_with_files):
+    """#97: a symlink loop in the user-supplied path must surface as 400, not
+    bubble RuntimeError from Path.resolve() up as a generic 500."""
+    client, _, state, home = app_with_files
+    repo = home / "repo_loop"
+    repo.mkdir()
+    # Make a symlink loop: a -> b -> a (both inside repo).
+    a = repo / "a"
+    b = repo / "b"
+    a.symlink_to(b)
+    b.symlink_to(a)
+    state.sessions = {1: _make_session(1, str(repo))}
+
+    r = client.get(
+        "/api/files/diff",
+        params={"cwd": str(repo), "path": "a"},
+    )
+    assert r.status_code == 400, r.json()
+    detail = r.json().get("detail", "").lower()
+    assert "path resolution failed" in detail or "symlink" in detail
+
+
 def test_file_diff_rejects_cwd_outside_active_sessions(app_with_files):
     client, _, state, home = app_with_files
     # An existing dir under HOME, but no session lives there.
