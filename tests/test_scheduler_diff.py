@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 from backend.config import DEFAULT_CONFIG
@@ -15,13 +15,13 @@ def _mk_sess(pid: int, input_tokens: int = 0) -> ClaudeSession:
     return ClaudeSession(
         pid=pid,
         cwd="/tmp",
-        started_at=datetime(2026, 5, 12, 10, 0, 0, tzinfo=UTC),
+        started_at=datetime(2026, 5, 12, 10, 0, 0, tzinfo=timezone.utc),
         duration_seconds=10,
         cpu_percent=0.0,
         memory_mb=100.0,
         status="idle",
         location_type="headless",
-        last_activity_at=datetime(2026, 5, 12, 10, 0, 0, tzinfo=UTC),
+        last_activity_at=datetime(2026, 5, 12, 10, 0, 0, tzinfo=timezone.utc),
         usage=TokenUsage(input_tokens=input_tokens),
     )
 

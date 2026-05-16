@@ -56,6 +56,7 @@ ignore = [
   "B904",  # raise ... from err (verbose, low-value here)
   "UP006", # PEP 585 generics — keep `List[X]` style optional
   "UP007", # use `X | Y` — already done where it matters
+  "UP017", # `datetime.UTC` is 3.11+; we still support 3.10 (Issue #26)
 ]
 
 [tool.ruff.format]
