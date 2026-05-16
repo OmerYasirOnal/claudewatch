@@ -47,6 +47,17 @@
     </div>
   </template>
 
+  <!-- Connection error banner -->
+  <template x-if="errorBanner">
+    <div class="bg-red-950/40 border-y border-red-900/50 text-red-200 text-sm">
+      <div class="max-w-7xl mx-auto px-6 py-2 flex items-start gap-3">
+        <span class="font-medium">Connection error:</span>
+        <span x-text="errorBanner.text"></span>
+        <button @click="errorBanner=null" class="ml-auto text-red-300 hover:text-white">×</button>
+      </div>
+    </div>
+  </template>
+
   <main class="max-w-7xl mx-auto px-6 py-6">
 
     <!-- Dashboard view -->
