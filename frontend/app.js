@@ -5,9 +5,9 @@ function appRoot() {
     history: [],
     stats: {},
     health: { iterm_api: null, tmux_available: null, log_dir_found: null, issues: [] },
-    config: { pricing: {} },
+    config: { pricing: {}, notifications: {} },
     filter: "All",
-    filters: ["All", "iTerm", "Tmux", "Headless", "Working", "Idle", "High-cost"],
+    filters: ["All", "iTerm", "Tmux", "Headless", "Working", "Idle", "High-cost", "Bookmarked"],
     detailPid: null,
     detail: null,
     showNewModal: false,
@@ -24,7 +24,54 @@ function appRoot() {
       cost_today: true,
     },
 
+    // F2 - Insights
+    insightsData: { projects: [], hourly: { bins: [] } },
+    _insightsTimer: null,
+
+    // F3 - Search
+    searchQuery: "",
+    _searchDebounce: null,
+    _searchQueryDebounced: "",
+
+    // F4 - Keyboard shortcuts
+    selectedPidIdx: 0,
+    showShortcuts: false,
+    _gPressed: false,
+    _gPressedAt: 0,
+
+    // F1 - subagents
+    expandedSubagents: {},
+
+    // F5 - bookmarks
+    bookmarks: [],
+
+    // F6 - notes
+    notes: {},
+    notesEditPid: null,
+    notesEditKey: null,
+    notesEditText: "",
+
+    // F7 - appearance
+    appearance: "dark",
+
+    // F8 - density
+    density: "comfortable",
+
     async init() {
+      this._loadLocalPrefs();
+      this._applyAppearance();
+      this._applyDensity();
+      await Promise.all([this.loadHealth(), this.loadSessions(), this.loadStats(), this.loadConfig()]);
+      this.connectSSE();
+      this._startNowTimer();
+      this._installKeydown();
+      setInterval(() => this.loadStats(), 5000);
+      setInterval(() => this.loadHealth(), 30000);
+      // Watch insights view
+      this.$watch && this.$watch('view', (v) => this._onViewChange(v));
+    },
+
+    _loadLocalPrefs() {
       try {
         const raw = localStorage.getItem("claudewatch.cardVisibility");
         if (raw) {
@@ -33,12 +80,36 @@ function appRoot() {
             this.cardVisibility = { ...this.cardVisibility, ...parsed };
           }
         }
-      } catch (e) { /* ignore malformed storage */ }
-      await Promise.all([this.loadHealth(), this.loadSessions(), this.loadStats(), this.loadConfig()]);
-      this.connectSSE();
-      this._startNowTimer();
-      setInterval(() => this.loadStats(), 5000);
-      setInterval(() => this.loadHealth(), 30000);
+      } catch (e) { /* ignore */ }
+      try {
+        const bm = localStorage.getItem("claudewatch.bookmarks");
+        if (bm) {
+          const parsed = JSON.parse(bm);
+          if (Array.isArray(parsed)) this.bookmarks = parsed;
+        }
+      } catch (e) { /* ignore */ }
+      try {
+        const nt = localStorage.getItem("claudewatch.notes");
+        if (nt) {
+          const parsed = JSON.parse(nt);
+          if (parsed && typeof parsed === "object") this.notes = parsed;
+        }
+      } catch (e) { /* ignore */ }
+      try {
+        const app = localStorage.getItem("claudewatch.appearance");
+        if (app === "light" || app === "dark") this.appearance = app;
+      } catch (e) { /* ignore */ }
+      try {
+        const den = localStorage.getItem("claudewatch.density");
+        if (den === "comfortable" || den === "compact") this.density = den;
+      } catch (e) { /* ignore */ }
+      try {
+        const ex = localStorage.getItem("claudewatch.expandedSubagents");
+        if (ex) {
+          const parsed = JSON.parse(ex);
+          if (parsed && typeof parsed === "object") this.expandedSubagents = parsed;
+        }
+      } catch (e) { /* ignore */ }
     },
 
     saveCardVisibility() {
@@ -46,10 +117,50 @@ function appRoot() {
         localStorage.setItem("claudewatch.cardVisibility", JSON.stringify(this.cardVisibility));
       } catch (e) { console.warn("save cardVisibility failed", e); }
     },
+    saveBookmarks() {
+      try { localStorage.setItem("claudewatch.bookmarks", JSON.stringify(this.bookmarks)); }
+      catch (e) { console.warn("save bookmarks failed", e); }
+    },
+    saveNotes() {
+      try { localStorage.setItem("claudewatch.notes", JSON.stringify(this.notes)); }
+      catch (e) { console.warn("save notes failed", e); }
+    },
+    saveExpandedSubagents() {
+      try { localStorage.setItem("claudewatch.expandedSubagents", JSON.stringify(this.expandedSubagents)); }
+      catch (e) { /* ignore */ }
+    },
+    saveAppearance() {
+      try { localStorage.setItem("claudewatch.appearance", this.appearance); }
+      catch (e) { /* ignore */ }
+      this._applyAppearance();
+    },
+    saveDensity() {
+      try { localStorage.setItem("claudewatch.density", this.density); }
+      catch (e) { /* ignore */ }
+      this._applyDensity();
+    },
+    _applyAppearance() {
+      const html = document.documentElement;
+      const body = document.body;
+      if (this.appearance === "light") {
+        html.classList.add("light"); html.classList.remove("dark");
+        if (body) { body.classList.add("light"); body.classList.remove("dark"); }
+      } else {
+        html.classList.add("dark"); html.classList.remove("light");
+        if (body) { body.classList.add("dark"); body.classList.remove("light"); }
+      }
+    },
+    _applyDensity() {
+      const html = document.documentElement;
+      if (this.density === "compact") {
+        html.classList.add("compact"); html.classList.remove("comfortable");
+      } else {
+        html.classList.add("comfortable"); html.classList.remove("compact");
+      }
+    },
 
     _setError(msg) {
       this.errorBanner = { text: msg, ts: Date.now() };
-      // auto-clear after 8s
       setTimeout(() => {
         if (this.errorBanner && Date.now() - this.errorBanner.ts >= 8000) {
           this.errorBanner = null;
@@ -93,7 +204,11 @@ function appRoot() {
       let r;
       try {
         r = await fetch("/api/config");
-        if (r.ok) { this.config = await r.json(); return; }
+        if (r.ok) {
+          this.config = await r.json();
+          if (!this.config.notifications) this.config.notifications = {};
+          return;
+        }
       } catch (e) { /* ignore */ }
       this._setError(`Failed to load /api/config: HTTP ${r?.status ?? '???'}`);
     },
@@ -104,7 +219,10 @@ function appRoot() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(updates),
         });
-        if (r.ok) this.config = await r.json();
+        if (r.ok) {
+          this.config = await r.json();
+          if (!this.config.notifications) this.config.notifications = {};
+        }
       } catch (e) { console.warn("save config failed", e); }
     },
     async updatePricing(model, key, value) {
@@ -115,6 +233,15 @@ function appRoot() {
       this.config.pricing = next;
       await this.saveConfig({ pricing: next });
     },
+    async saveNotificationConfig() {
+      const n = this.config.notifications || {};
+      await this.saveConfig({ notifications: {
+        enabled: !!n.enabled,
+        on_session_end: !!n.on_session_end,
+        on_high_cost: !!n.on_high_cost,
+        cost_threshold_usd: Number(n.cost_threshold_usd) || 0,
+      }});
+    },
     async loadDetail(pid) {
       let r;
       try {
@@ -124,11 +251,176 @@ function appRoot() {
       this._setError(`Failed to load /api/sessions/${pid}: HTTP ${r?.status ?? '???'}`);
     },
 
+    // F2 - Insights data
+    async loadInsights() {
+      try {
+        const [pRes, hRes] = await Promise.all([
+          fetch("/api/projects").catch(() => null),
+          fetch("/api/history/hourly?hours=24").catch(() => null),
+        ]);
+        const projects = pRes && pRes.ok ? await pRes.json() : [];
+        const hourly = hRes && hRes.ok ? await hRes.json() : { bins: [] };
+        this.insightsData = {
+          projects: Array.isArray(projects) ? projects : [],
+          hourly: hourly && hourly.bins ? hourly : { bins: [] },
+        };
+        // Defer rendering until DOM updated
+        this.$nextTick && this.$nextTick(() => this._renderInsightsCharts());
+        setTimeout(() => this._renderInsightsCharts(), 50);
+      } catch (e) {
+        console.warn("insights load failed", e);
+      }
+    },
+    _onViewChange(v) {
+      if (v === "insights") {
+        this.loadInsights();
+        if (this._insightsTimer) clearInterval(this._insightsTimer);
+        this._insightsTimer = setInterval(() => this.loadInsights(), 30000);
+      } else {
+        if (this._insightsTimer) { clearInterval(this._insightsTimer); this._insightsTimer = null; }
+      }
+      if (v === "history") this.loadHistory();
+    },
+
+    _renderInsightsCharts() {
+      const barCanvas = document.getElementById("insights-bar");
+      if (barCanvas) {
+        const bins = (this.insightsData.hourly && this.insightsData.hourly.bins) || [];
+        const data = bins.map((b) => ({
+          label: (b.hour || "").slice(11, 16) || (b.hour || ""),
+          value: Number(b.cost) || 0,
+        }));
+        this.drawBarChart(barCanvas, data);
+      }
+      const donutCanvas = document.getElementById("insights-donut");
+      if (donutCanvas) {
+        const buckets = {};
+        for (const s of this.sessions) {
+          const m = s.model || "unknown";
+          const t = (s.usage && (s.usage.input_tokens || 0) + (s.usage.output_tokens || 0)) || 0;
+          buckets[m] = (buckets[m] || 0) + t;
+        }
+        const palette = ["#ec4899","#10b981","#f59e0b","#3b82f6","#a855f7","#ef4444","#06b6d4","#84cc16"];
+        const data = Object.entries(buckets)
+          .filter(([_, v]) => v > 0)
+          .map(([k, v], i) => ({ label: k, value: v, color: palette[i % palette.length] }));
+        this.drawDonut(donutCanvas, data);
+      }
+    },
+
+    drawBarChart(canvas, data) {
+      if (!canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const W = Math.max(200, Math.floor(rect.width));
+      const H = Math.max(120, Math.floor(rect.height || 180));
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      canvas.style.width = W + "px"; canvas.style.height = H + "px";
+      const ctx = canvas.getContext("2d");
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+      const light = this.appearance === "light";
+      const axisColor = light ? "#52525b" : "#a1a1aa";
+      const gridColor = light ? "#e4e4e7" : "#27272a";
+      const barColor = "#10b981";
+      const padL = 36, padR = 8, padT = 10, padB = 22;
+      const innerW = W - padL - padR, innerH = H - padT - padB;
+      const max = Math.max(0.01, ...data.map((d) => d.value));
+      // grid lines
+      ctx.strokeStyle = gridColor; ctx.lineWidth = 1;
+      ctx.fillStyle = axisColor; ctx.font = "10px ui-sans-serif, -apple-system";
+      for (let i = 0; i <= 4; i++) {
+        const y = padT + (innerH * i) / 4;
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+        const v = max * (1 - i / 4);
+        ctx.fillText("$" + v.toFixed(2), 2, y + 3);
+      }
+      if (!data.length) {
+        ctx.fillStyle = axisColor;
+        ctx.fillText("No data", padL + innerW / 2 - 20, padT + innerH / 2);
+        return;
+      }
+      const n = data.length;
+      const gap = 2;
+      const barW = Math.max(2, (innerW - gap * (n - 1)) / n);
+      data.forEach((d, i) => {
+        const h = max > 0 ? (d.value / max) * innerH : 0;
+        const x = padL + i * (barW + gap);
+        const y = padT + innerH - h;
+        ctx.fillStyle = barColor;
+        ctx.fillRect(x, y, barW, h);
+      });
+      // x-axis labels (every Nth)
+      ctx.fillStyle = axisColor;
+      const stride = Math.max(1, Math.ceil(n / 6));
+      data.forEach((d, i) => {
+        if (i % stride !== 0) return;
+        const x = padL + i * (barW + gap) + barW / 2;
+        const label = d.label || "";
+        const w = ctx.measureText(label).width;
+        ctx.fillText(label, x - w / 2, H - 6);
+      });
+    },
+
+    drawDonut(canvas, data) {
+      if (!canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const W = Math.max(200, Math.floor(rect.width));
+      const H = Math.max(160, Math.floor(rect.height || 200));
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      canvas.style.width = W + "px"; canvas.style.height = H + "px";
+      const ctx = canvas.getContext("2d");
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+      const light = this.appearance === "light";
+      const labelColor = light ? "#27272a" : "#e4e4e7";
+      const total = data.reduce((a, b) => a + (Number(b.value) || 0), 0);
+      const cx = H / 2 + 4, cy = H / 2, r = Math.min(H, W) / 2 - 12, inner = r * 0.6;
+      if (total <= 0) {
+        ctx.fillStyle = light ? "#71717a" : "#a1a1aa";
+        ctx.font = "12px ui-sans-serif, -apple-system";
+        ctx.fillText("No active token usage", 10, H / 2);
+        return;
+      }
+      let angle = -Math.PI / 2;
+      for (const d of data) {
+        const v = Number(d.value) || 0;
+        const slice = (v / total) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, r, angle, angle + slice);
+        ctx.closePath();
+        ctx.fillStyle = d.color || "#10b981";
+        ctx.fill();
+        angle += slice;
+      }
+      // inner hole
+      ctx.beginPath();
+      ctx.fillStyle = light ? "#fafafa" : "#09090b";
+      ctx.arc(cx, cy, inner, 0, Math.PI * 2);
+      ctx.fill();
+      // legend
+      ctx.font = "11px ui-sans-serif, -apple-system";
+      ctx.fillStyle = labelColor;
+      let ly = 18;
+      const lx = H + 16;
+      for (const d of data) {
+        ctx.fillStyle = d.color || "#10b981";
+        ctx.fillRect(lx, ly - 9, 10, 10);
+        ctx.fillStyle = labelColor;
+        const pct = ((d.value / total) * 100).toFixed(1);
+        const label = `${d.label} · ${pct}%`;
+        ctx.fillText(label, lx + 16, ly);
+        ly += 16;
+        if (ly > H - 4) break;
+      }
+    },
+
     connectSSE() {
       try {
         this._sse = new EventSource("/api/stream");
         this._sse.onopen = () => {
-          // Successful connection — reset backoff.
           this._sseReconnectDelay = 1000;
         };
         this._sse.addEventListener("snapshot", (e) => {
@@ -161,6 +453,30 @@ function appRoot() {
       else this.sessions.push(sess);
     },
 
+    // F3 - search debounce
+    onSearchInput(value) {
+      this.searchQuery = value;
+      if (this._searchDebounce) clearTimeout(this._searchDebounce);
+      this._searchDebounce = setTimeout(() => {
+        this._searchQueryDebounced = (this.searchQuery || "").trim().toLowerCase();
+      }, 150);
+    },
+
+    _sessionMatchesSearch(s) {
+      const q = this._searchQueryDebounced;
+      if (!q) return true;
+      const haystackParts = [
+        s.cwd,
+        s.model,
+        s.current_task_subject,
+        s.current_task_active_form,
+        s.iterm_tab_title,
+        s.tool_calls && s.tool_calls.last_used,
+      ];
+      const hay = haystackParts.filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(q);
+    },
+
     visibleSessions() {
       let arr = [...this.sessions];
       switch (this.filter) {
@@ -172,9 +488,19 @@ function appRoot() {
         case "High-cost":
           arr = arr.filter((s) => s.usage && (s.usage.cost_estimate_usd || 0) >= 1.0);
           break;
+        case "Bookmarked":
+          arr = arr.filter((s) => this.isBookmarked(s));
+          break;
       }
-      // Most recently-active first
-      arr.sort((a, b) => (b.last_activity_at || "").localeCompare(a.last_activity_at || ""));
+      // search
+      arr = arr.filter((s) => this._sessionMatchesSearch(s));
+      // Bookmarks first, then most recently-active
+      arr.sort((a, b) => {
+        const ab = this.isBookmarked(a) ? 1 : 0;
+        const bb = this.isBookmarked(b) ? 1 : 0;
+        if (ab !== bb) return bb - ab;
+        return (b.last_activity_at || "").localeCompare(a.last_activity_at || "");
+      });
       return arr;
     },
 
@@ -185,8 +511,7 @@ function appRoot() {
     },
 
     fmtElapsed(seconds, fromIso) {
-      // Live-updating elapsed seconds: use base seconds + delta since fromIso was captured.
-      void this.nowTick;  // make Alpine track this
+      void this.nowTick;
       let s = Number(seconds || 0);
       if (fromIso) {
         const driftMs = Date.now() - new Date(fromIso).getTime();
@@ -216,7 +541,7 @@ function appRoot() {
       if (n === null || n === undefined) return "—";
       const num = Number(n);
       if (!Number.isFinite(num)) return "—";
-      if (num < 0) return String(num);  // edge: shouldn't happen but don't lose units mid-conversion
+      if (num < 0) return String(num);
       if (num >= 1e15) return (num / 1e15).toFixed(2) + "Q";
       if (num >= 1e12) return (num / 1e12).toFixed(2) + "T";
       if (num >= 1e9)  return (num / 1e9).toFixed(2) + "B";
@@ -239,6 +564,83 @@ function appRoot() {
     fmtTime(iso) {
       if (!iso) return "—";
       return new Date(iso).toLocaleString();
+    },
+
+    // F1 - subagents
+    sessionKey(s) {
+      return `${s.pid}:${s.started_at || ""}`;
+    },
+    subagentSummary(s) {
+      const arr = s.subagents || [];
+      if (!arr.length) return null;
+      const completed = arr.filter((x) => x.status === "completed").length;
+      const pending = arr.filter((x) => x.status === "pending").length;
+      const other = arr.length - completed - pending;
+      const parts = [];
+      if (completed) parts.push(`${completed} completed`);
+      if (pending) parts.push(`${pending} running`);
+      if (other) parts.push(`${other} other`);
+      return { total: arr.length, text: parts.join(", ") };
+    },
+    toggleSubagents(s) {
+      const k = this.sessionKey(s);
+      this.expandedSubagents[k] = !this.expandedSubagents[k];
+      this.saveExpandedSubagents();
+    },
+    isSubagentsExpanded(s) {
+      return !!this.expandedSubagents[this.sessionKey(s)];
+    },
+    subagentDuration(sa) {
+      void this.nowTick;
+      if (sa.duration_seconds != null) return this.fmtElapsed(sa.duration_seconds, null);
+      if (sa.started_at && !sa.ended_at) {
+        return this.fmtElapsed(0, sa.started_at);
+      }
+      return "—";
+    },
+
+    // F5 - bookmarks
+    isBookmarked(s) {
+      return this.bookmarks.includes(this.sessionKey(s));
+    },
+    toggleBookmark(s) {
+      const k = this.sessionKey(s);
+      const i = this.bookmarks.indexOf(k);
+      if (i >= 0) this.bookmarks.splice(i, 1);
+      else this.bookmarks.push(k);
+      this.saveBookmarks();
+    },
+
+    // F6 - notes
+    sessionNote(s) {
+      return this.notes[this.sessionKey(s)] || "";
+    },
+    openNoteEditor(s) {
+      this.notesEditKey = this.sessionKey(s);
+      this.notesEditPid = s.pid;
+      this.notesEditText = this.notes[this.notesEditKey] || "";
+    },
+    saveNoteEditor() {
+      if (!this.notesEditKey) return;
+      const text = (this.notesEditText || "").trim();
+      if (text) this.notes[this.notesEditKey] = text;
+      else delete this.notes[this.notesEditKey];
+      this.saveNotes();
+      this.closeNoteEditor();
+    },
+    closeNoteEditor() {
+      this.notesEditPid = null;
+      this.notesEditKey = null;
+      this.notesEditText = "";
+    },
+
+    // F10 - export
+    exportSession(s) {
+      const url = `/api/sessions/${s.pid}/export`;
+      window.open(url, "_blank");
+    },
+    exportAll() {
+      window.open("/api/export.csv?days=7", "_blank");
     },
 
     async focusSession(sess) {
@@ -288,6 +690,98 @@ function appRoot() {
       } catch (e) {
         this.newSessionError = String(e);
       }
+    },
+
+    // F2 - jump to dashboard filtered by cwd via search bar
+    jumpToProject(cwd) {
+      this.view = "dashboard";
+      this.searchQuery = cwd;
+      this._searchQueryDebounced = (cwd || "").toLowerCase();
+    },
+
+    // F4 - keyboard shortcuts
+    _installKeydown() {
+      window.addEventListener("keydown", (e) => this._onKeydown(e));
+    },
+    _onKeydown(e) {
+      const target = e.target;
+      const isEditable = target && (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      );
+      // Esc closes modals (works even inside inputs to escape)
+      if (e.key === "Escape") {
+        if (this.showShortcuts) { this.showShortcuts = false; e.preventDefault(); return; }
+        if (this.notesEditPid !== null) { this.closeNoteEditor(); e.preventDefault(); return; }
+        if (this.detailPid !== null) { this.detailPid = null; this.detail = null; e.preventDefault(); return; }
+        if (this.showNewModal) { this.showNewModal = false; e.preventDefault(); return; }
+        if (isEditable && target.blur) target.blur();
+        return;
+      }
+      if (isEditable) return;
+      // "/" focuses search
+      if (e.key === "/") {
+        const el = document.getElementById("global-search");
+        if (el) { el.focus(); e.preventDefault(); }
+        return;
+      }
+      if (e.key === "?") {
+        this.showShortcuts = true;
+        e.preventDefault();
+        return;
+      }
+      // g-prefix tab switches
+      if (e.key === "g") {
+        this._gPressed = true;
+        this._gPressedAt = Date.now();
+        setTimeout(() => {
+          if (Date.now() - this._gPressedAt >= 1200) this._gPressed = false;
+        }, 1300);
+        return;
+      }
+      if (this._gPressed && Date.now() - this._gPressedAt < 1200) {
+        if (e.key === "i") { this.view = "insights"; this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "d") { this.view = "dashboard"; this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "h") { this.view = "history"; this.loadHistory(); this._gPressed = false; e.preventDefault(); return; }
+        if (e.key === "s") { this.view = "settings"; this._gPressed = false; e.preventDefault(); return; }
+        this._gPressed = false;
+      }
+      // Dashboard-specific
+      if (this.view !== "dashboard") return;
+      const list = this.visibleSessions();
+      if (!list.length) return;
+      if (e.key === "j") {
+        this.selectedPidIdx = Math.min(list.length - 1, (this.selectedPidIdx || 0) + 1);
+        this._scrollSelectedIntoView();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "k") {
+        this.selectedPidIdx = Math.max(0, (this.selectedPidIdx || 0) - 1);
+        this._scrollSelectedIntoView();
+        e.preventDefault();
+        return;
+      }
+      const sel = list[this.selectedPidIdx];
+      if (!sel) return;
+      if (e.key === "Enter") {
+        this.detailPid = sel.pid;
+        this.loadDetail(sel.pid);
+        e.preventDefault();
+      } else if (e.key === "f") {
+        this.focusSession(sel);
+        e.preventDefault();
+      } else if (e.key === "h") {
+        this.haltSession(sel);
+        e.preventDefault();
+      }
+    },
+    _scrollSelectedIntoView() {
+      this.$nextTick && this.$nextTick(() => {
+        const el = document.querySelector(`[data-session-idx="${this.selectedPidIdx}"]`);
+        if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      });
     },
   };
 }
