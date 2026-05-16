@@ -17,14 +17,46 @@ from backend.models import SubagentRun, TokenUsage, ToolCallStats
 _ASYNC_ACK_RE = re.compile(r"Async agent launched successfully\.?\s*[·\-:]?\s*agentId:\s*([A-Za-z0-9_-]+)")
 
 # Background completions arrive as a user-entry whose serialized content
-# contains a <task-notification> block keyed by <task-id>. We parse with a
-# regex rather than a real XML parser because the surrounding text may
-# contain arbitrary characters (including unescaped angle brackets) and
-# we only need a few specific fields.
-_TASK_NOTIF_BLOCK_RE = re.compile(
-    r"<task-notification>(.*?)</task-notification>",
-    re.DOTALL,
-)
+# contains a <task-notification> block keyed by <task-id>. We extract the
+# blocks manually via str.find rather than a regex with a lazy body —
+# Issue #86: a lazy `.*?` body backtracks quadratically on user-supplied
+# input containing many unmatched `<task-notification>` opens; a few
+# thousand opens stalled the scheduler loop for seconds. The inner
+# fields (<task-id>, <summary>, <result>) are extracted from each
+# captured block with their own dedicated regexes below; their bodies
+# are bounded by the surrounding block size so they remain safe.
+_TASK_NOTIF_OPEN = "<task-notification>"
+_TASK_NOTIF_CLOSE = "</task-notification>"
+# Hard cap on how much joined text we scan for task-notifications. Above
+# this we look only at the tail — task-notifications are user-entry-scoped
+# and the real ones are tiny (<2 KB). Trade-off: a notification buried
+# in the middle of a multi-MB user prompt is missed, but the scheduler
+# tick is protected from CPU-bound scanning of adversarial input.
+_TASK_NOTIF_SCAN_MAX_BYTES = 64 * 1024
+
+
+def _iter_task_notification_bodies(text: str) -> list[str]:
+    """Return each <task-notification>...</task-notification> body in ``text``.
+
+    Non-backtracking scan via ``str.find``; safe on adversarial input.
+    """
+    bodies: list[str] = []
+    pos = 0
+    open_len = len(_TASK_NOTIF_OPEN)
+    close_len = len(_TASK_NOTIF_CLOSE)
+    while True:
+        start = text.find(_TASK_NOTIF_OPEN, pos)
+        if start < 0:
+            break
+        body_start = start + open_len
+        end = text.find(_TASK_NOTIF_CLOSE, body_start)
+        if end < 0:
+            break
+        bodies.append(text[body_start:end])
+        pos = end + close_len
+    return bodies
+
+
 _TASK_ID_RE = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
 _TASK_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 _TASK_RESULT_RE = re.compile(r"<result>(.*?)</result>", re.DOTALL)
@@ -243,7 +275,21 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
                                 # Issue #66: background dispatch ACK — don't mark the
                                 # run as completed; remember the agentId so a later
                                 # <task-notification> entry can close it out.
-                                agent_id_by_tool_use[tu_id] = ack_match.group(1)
+                                new_agent_id = ack_match.group(1)
+                                # Issue #92: Claude has been observed to
+                                # regenerate the same agentId for distinct
+                                # background runs. Warn at debug-level on
+                                # overwrite; the match step below picks the
+                                # most-recent pending entry on collision.
+                                existing = agent_id_by_tool_use.get(tu_id)
+                                if existing is not None and existing != new_agent_id:
+                                    log.debug(
+                                        "agent_id_by_tool_use overwrite tu_id=%s old=%s new=%s",
+                                        tu_id,
+                                        existing,
+                                        new_agent_id,
+                                    )
+                                agent_id_by_tool_use[tu_id] = new_agent_id
                                 continue
                             run.ended_at = ts
                             if ts is not None:
@@ -252,9 +298,13 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
                             run.result_preview = preview
                         if notification_text_parts:
                             joined = "\n".join(notification_text_parts)
+                            # Issue #86: cap how much we scan. Real
+                            # task-notifications are tiny; if the user pasted
+                            # a multi-MB blob we look only at its tail.
+                            if len(joined) > _TASK_NOTIF_SCAN_MAX_BYTES:
+                                joined = joined[-_TASK_NOTIF_SCAN_MAX_BYTES:]
                             if "<task-notification>" in joined and "<task-id>" in joined:
-                                for block_match in _TASK_NOTIF_BLOCK_RE.finditer(joined):
-                                    body = block_match.group(1)
+                                for body in _iter_task_notification_bodies(joined):
                                     id_match = _TASK_ID_RE.search(body)
                                     if id_match is None:
                                         continue
@@ -263,12 +313,29 @@ def parse_log(path: Path, now: datetime | None = None) -> ParsedLog:
                                     result_match = _TASK_RESULT_RE.search(body)
                                     summary = summary_match.group(1) if summary_match else None
                                     result_text = result_match.group(1) if result_match else None
-                                    # Resolve the SubagentRun whose stored agentId
-                                    # matches this <task-id>.
-                                    matched_tu_id = next(
-                                        (tu for tu, aid in agent_id_by_tool_use.items() if aid == agent_id),
-                                        None,
-                                    )
+                                    # Issue #92: pick the most-recently-added
+                                    # still-pending entry whose stored agentId
+                                    # matches this <task-id>. Iterating
+                                    # ``reversed()`` over the insertion-ordered
+                                    # dict walks newest → oldest, so when two
+                                    # background runs collide on agentId the
+                                    # later dispatch closes out first.
+                                    matched_tu_id: str | None = None
+                                    for tu, aid in reversed(agent_id_by_tool_use.items()):
+                                        if aid != agent_id:
+                                            continue
+                                        run = subagents_by_id.get(tu)
+                                        if run is not None and run.status == "pending":
+                                            matched_tu_id = tu
+                                            break
+                                    if matched_tu_id is None:
+                                        # No pending run for this agentId —
+                                        # fall back to most-recently-added
+                                        # match (idempotent re-delivery).
+                                        for tu, aid in reversed(agent_id_by_tool_use.items()):
+                                            if aid == agent_id:
+                                                matched_tu_id = tu
+                                                break
                                     if matched_tu_id is None:
                                         continue
                                     run = subagents_by_id.get(matched_tu_id)

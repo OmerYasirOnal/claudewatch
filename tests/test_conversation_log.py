@@ -375,6 +375,55 @@ def test_background_subagent_pending_when_notification_missing(tmp_path):
     assert run.duration_seconds is None
 
 
+def test_subagent_collision_completes_later_pending_run(tmp_path):
+    """Issue #92: two background Agent dispatches can share an agentId
+    (Claude has been observed to regenerate it). When the matching
+    <task-notification> arrives we must close out the most-recently-added
+    still-pending run, not the first one in insertion order."""
+    f = tmp_path / "collision.jsonl"
+    f.write_text(
+        _agent_tool_use_entry(
+            "2026-05-17T10:00:00.000Z",
+            "toolu_first",
+            "First Bg Job",
+            "general-purpose",
+        )
+        + _tool_result_entry(
+            "2026-05-17T10:00:00.100Z",
+            "toolu_first",
+            "Async agent launched successfully. · agentId: SAMEID (internal ID xyz)",
+        )
+        + _agent_tool_use_entry(
+            "2026-05-17T10:01:00.000Z",
+            "toolu_second",
+            "Second Bg Job",
+            "general-purpose",
+        )
+        + _tool_result_entry(
+            "2026-05-17T10:01:00.100Z",
+            "toolu_second",
+            "Async agent launched successfully. · agentId: SAMEID (internal ID xyz)",
+        )
+        + _task_notification_entry(
+            "2026-05-17T10:02:00.000Z",
+            "<task-notification>\n"
+            "<task-id>SAMEID</task-id>\n"
+            "<status>completed</status>\n"
+            "<result>second job done</result>\n"
+            "</task-notification>",
+        )
+    )
+    pl = parse_log(f)
+    assert len(pl.subagents) == 2
+    by_id = {r.tool_use_id: r for r in pl.subagents}
+    # The LATER dispatch must be the one that's now completed.
+    assert by_id["toolu_second"].status == "completed"
+    assert by_id["toolu_second"].result_preview == "second job done"
+    # The earlier one stays pending until its OWN notification arrives.
+    assert by_id["toolu_first"].status == "pending"
+    assert by_id["toolu_first"].ended_at is None
+
+
 def test_task_notification_extracts_summary_when_no_result(tmp_path):
     """When the <task-notification> has no <result> tag, fall back to
     the <summary> text for the preview."""
