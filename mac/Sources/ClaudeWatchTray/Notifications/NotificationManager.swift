@@ -183,15 +183,25 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
     }
 
     private func deliver(_ content: UNNotificationContent, identifier: String) async {
+        // Swift 6.0 (CI runner) treats UNNotificationRequest as non-Sendable
+        // when crossing actors. Bridge through a completion-handler call so
+        // the request never leaves the calling context, and capture the
+        // logger explicitly so the completion closure doesn't have to touch
+        // `self` from a nonisolated callback queue.
         let request = UNNotificationRequest(
             identifier: identifier,
             content: content,
             trigger: nil  // deliver immediately
         )
-        do {
-            try await UNUserNotificationCenter.current().add(request)
-        } catch {
-            logger.error("Failed to deliver notification \(identifier): \(error.localizedDescription)")
+        let logger = self.logger
+        let id = identifier
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error {
+                    logger.error("Failed to deliver notification \(id): \(error.localizedDescription)")
+                }
+                cont.resume()
+            }
         }
     }
 
