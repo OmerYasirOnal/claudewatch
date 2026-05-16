@@ -61,11 +61,31 @@ class ItermConnectionManager:
         self._last_error_at: float = 0.0
         self._cached_sessions: list[ItermSessionInfo] = []
         self._cached_at: float = 0.0
-        self._lock = asyncio.Lock()
+        # #34: Split locks. _conn_lock guards connection lifecycle (create/drop)
+        # only; reads & API calls don't need to serialize. Lets the user-driven
+        # focus_session run concurrently with the scheduler-driven get_sessions
+        # — both share self._conn but only block each other for the ~1ms it
+        # takes to create the connection the first time.
+        self._conn_lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
         return self._conn is not None
+
+    async def _ensure_connection(self, timeout: float) -> bool:
+        """Open self._conn lazily under _conn_lock. Returns True if usable."""
+        if self._conn is not None:
+            return True
+        async with self._conn_lock:
+            if self._conn is not None:  # double-checked under lock
+                return True
+            try:
+                self._conn = await asyncio.wait_for(iterm2.Connection.async_create(), timeout=timeout)
+                return True
+            except (TimeoutError, Exception) as e:  # noqa: BLE001
+                log.debug("iTerm connection failed: %s", e)
+                self._last_error_at = time.time()
+                return False
 
     async def get_sessions(self, timeout: float = 3.0) -> list[ItermSessionInfo]:
         if not _ITERM2_AVAILABLE:
@@ -75,20 +95,18 @@ class ItermConnectionManager:
         now = time.time()
         if self._conn is None and (now - self._last_error_at) < _RECONNECT_BACKOFF_SECONDS:
             return self._cached_sessions_if_fresh()
-
-        async with self._lock:
-            try:
-                if self._conn is None:
-                    self._conn = await asyncio.wait_for(iterm2.Connection.async_create(), timeout=timeout)
-                sessions = await asyncio.wait_for(self._enumerate(), timeout=timeout)
-            except (TimeoutError, Exception) as e:  # noqa: BLE001
-                log.debug("iTerm enumeration failed, dropping connection: %s", e)
-                await self._drop_connection()
-                self._last_error_at = time.time()
-                return self._cached_sessions_if_fresh()
-            self._cached_sessions = sessions
-            self._cached_at = time.time()
-            return sessions
+        if not await self._ensure_connection(timeout):
+            return self._cached_sessions_if_fresh()
+        try:
+            sessions = await asyncio.wait_for(self._enumerate(), timeout=timeout)
+        except (TimeoutError, Exception) as e:  # noqa: BLE001
+            log.debug("iTerm enumeration failed, dropping connection: %s", e)
+            await self._drop_connection()
+            self._last_error_at = time.time()
+            return self._cached_sessions_if_fresh()
+        self._cached_sessions = sessions
+        self._cached_at = time.time()
+        return sessions
 
     def _cached_sessions_if_fresh(self) -> list[ItermSessionInfo]:
         if not self._cached_sessions:
@@ -154,18 +172,15 @@ class ItermConnectionManager:
         now = time.time()
         if self._conn is None and (now - self._last_error_at) < _RECONNECT_BACKOFF_SECONDS:
             return False
-
-        async with self._lock:
-            try:
-                if self._conn is None:
-                    self._conn = await asyncio.wait_for(iterm2.Connection.async_create(), timeout=timeout)
-                found = await asyncio.wait_for(self._activate(session_id), timeout=timeout)
-            except (TimeoutError, Exception) as e:  # noqa: BLE001
-                log.debug("iTerm focus_session failed, dropping connection: %s", e)
-                await self._drop_connection()
-                self._last_error_at = time.time()
-                return False
-            return found
+        if not await self._ensure_connection(timeout):
+            return False
+        try:
+            return await asyncio.wait_for(self._activate(session_id), timeout=timeout)
+        except (TimeoutError, Exception) as e:  # noqa: BLE001
+            log.debug("iTerm focus_session failed, dropping connection: %s", e)
+            await self._drop_connection()
+            self._last_error_at = time.time()
+            return False
 
     async def _activate(self, session_id: str) -> bool:
         assert self._conn is not None
@@ -183,7 +198,7 @@ class ItermConnectionManager:
         return False
 
     async def close(self) -> None:
-        async with self._lock:
+        async with self._conn_lock:
             await self._drop_connection()
             self._cached_sessions = []
             self._cached_at = 0.0
