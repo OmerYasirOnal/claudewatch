@@ -47,6 +47,40 @@ def _http_get(path: str):
         return json.loads(resp.read())
 
 
+def _wait_for_server_ready(url: str, timeout_s: float = 10.0, poll_interval_s: float = 0.2) -> bool:
+    """Poll ``url`` until it returns a parseable JSON 200, or ``timeout_s`` elapses.
+
+    Returns True on first successful response, False on timeout.
+    """
+    import urllib.error
+    import urllib.request
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1) as resp:
+                if resp.status == 200:
+                    json.loads(resp.read())
+                    return True
+        except (urllib.error.URLError, ConnectionError, OSError, ValueError):
+            pass
+        time.sleep(poll_interval_s)
+    return False
+
+
+def _tail_file(path: Path, lines: int = 30) -> str:
+    """Return the last ``lines`` lines of ``path``, or a friendly message if missing."""
+    if not path.is_file():
+        return f"(log file {path} does not exist)"
+    try:
+        with open(path, "rb") as f:
+            content = f.read().decode("utf-8", errors="replace")
+    except OSError as e:
+        return f"(failed to read log: {e})"
+    tail = content.splitlines()[-lines:]
+    return "\n".join(tail) if tail else "(log is empty)"
+
+
 @app.command()
 def start(daemon: bool = typer.Option(False, "--daemon", "-d", help="Detach to background")) -> None:
     """Start the ClaudeWatch server."""
@@ -78,10 +112,22 @@ def start(daemon: bool = typer.Option(False, "--daemon", "-d", help="Detach to b
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
+        if _wait_for_server_ready(_server_url() + "/api/health", timeout_s=10.0, poll_interval_s=0.2):
+            PID_FILE.write_text(str(proc.pid))
+            console.print(f"[green]Started ClaudeWatch (PID {proc.pid}) → {_server_url()}[/green]")
+            return
+        # Timeout — figure out whether the process is still alive.
+        if proc.poll() is not None:
+            console.print("[red]Server failed to start; tail of log:[/red]")
+            console.print(_tail_file(log_path, lines=30))
+            raise typer.Exit(1)
+        # Process is alive but unresponsive. Keep the PID file so the user can manage it.
         PID_FILE.write_text(str(proc.pid))
-        time.sleep(1.0)
-        console.print(f"[green]Started ClaudeWatch (PID {proc.pid}) → {_server_url()}[/green]")
-        return
+        console.print(
+            "[yellow]Server didn't respond within 10s but process is still running; "
+            "check `claudewatch logs`[/yellow]"
+        )
+        raise typer.Exit(1)
     uvicorn.run(
         "backend.server:app",
         host="127.0.0.1",
@@ -99,14 +145,29 @@ def stop() -> None:
         return
     os.kill(pid, signal.SIGTERM)
     deadline = time.time() + 5
+    exited = False
     while time.time() < deadline:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
+            exited = True
             break
         time.sleep(0.2)
-    PID_FILE.unlink(missing_ok=True)
-    console.print(f"[green]Stopped PID {pid}[/green]")
+    if not exited:
+        # Final check — process might have died between the last poll and now.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            exited = True
+    if exited:
+        PID_FILE.unlink(missing_ok=True)
+        console.print(f"[green]Stopped PID {pid}[/green]")
+        return
+    console.print(
+        f"[red]PID {pid} did not exit within 5s after SIGTERM. "
+        f"PID file preserved. Try `kill -9 {pid}` or wait longer.[/red]"
+    )
+    raise typer.Exit(1)
 
 
 @app.command()
