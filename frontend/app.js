@@ -14,6 +14,8 @@ function appRoot() {
     newSession: { cwd: "", window_type: "new-window", skipPerm: true, customFlags: "" },
     newSessionError: "",
     _sse: null,
+    _sseReconnectDelay: 1000,
+    errorBanner: null,  // { text, ts } | null
     cardVisibility: {
       active: true,
       sessions_today: true,
@@ -45,35 +47,55 @@ function appRoot() {
       } catch (e) { console.warn("save cardVisibility failed", e); }
     },
 
+    _setError(msg) {
+      this.errorBanner = { text: msg, ts: Date.now() };
+      // auto-clear after 8s
+      setTimeout(() => {
+        if (this.errorBanner && Date.now() - this.errorBanner.ts >= 8000) {
+          this.errorBanner = null;
+        }
+      }, 8500);
+    },
+
     async loadHealth() {
+      let r;
       try {
-        const r = await fetch("/api/health");
-        if (r.ok) this.health = await r.json();
+        r = await fetch("/api/health");
+        if (r.ok) { this.health = await r.json(); return; }
       } catch (e) { console.warn("health failed", e); }
+      this._setError(`Failed to load /api/health: HTTP ${r?.status ?? '???'}`);
     },
     async loadSessions() {
+      let r;
       try {
-        const r = await fetch("/api/sessions");
-        if (r.ok) this.sessions = await r.json();
+        r = await fetch("/api/sessions");
+        if (r.ok) { this.sessions = await r.json(); return; }
       } catch (e) { console.warn("sessions failed", e); }
+      this._setError(`Failed to load /api/sessions: HTTP ${r?.status ?? '???'}`);
     },
     async loadStats() {
+      let r;
       try {
-        const r = await fetch("/api/stats");
-        if (r.ok) this.stats = await r.json();
+        r = await fetch("/api/stats");
+        if (r.ok) { this.stats = await r.json(); return; }
       } catch (e) { /* ignore */ }
+      this._setError(`Failed to load /api/stats: HTTP ${r?.status ?? '???'}`);
     },
     async loadHistory() {
+      let r;
       try {
-        const r = await fetch("/api/history");
-        if (r.ok) this.history = await r.json();
+        r = await fetch("/api/history");
+        if (r.ok) { this.history = await r.json(); return; }
       } catch (e) { /* ignore */ }
+      this._setError(`Failed to load /api/history: HTTP ${r?.status ?? '???'}`);
     },
     async loadConfig() {
+      let r;
       try {
-        const r = await fetch("/api/config");
-        if (r.ok) this.config = await r.json();
+        r = await fetch("/api/config");
+        if (r.ok) { this.config = await r.json(); return; }
       } catch (e) { /* ignore */ }
+      this._setError(`Failed to load /api/config: HTTP ${r?.status ?? '???'}`);
     },
     async saveConfig(updates) {
       try {
@@ -94,15 +116,21 @@ function appRoot() {
       await this.saveConfig({ pricing: next });
     },
     async loadDetail(pid) {
+      let r;
       try {
-        const r = await fetch(`/api/sessions/${pid}`);
-        if (r.ok) this.detail = await r.json();
+        r = await fetch(`/api/sessions/${pid}`);
+        if (r.ok) { this.detail = await r.json(); return; }
       } catch (e) { /* ignore */ }
+      this._setError(`Failed to load /api/sessions/${pid}: HTTP ${r?.status ?? '???'}`);
     },
 
     connectSSE() {
       try {
         this._sse = new EventSource("/api/stream");
+        this._sse.onopen = () => {
+          // Successful connection — reset backoff.
+          this._sseReconnectDelay = 1000;
+        };
         this._sse.addEventListener("snapshot", (e) => {
           const data = JSON.parse(e.data);
           if (data.sessions) this.sessions = data.sessions;
@@ -121,7 +149,9 @@ function appRoot() {
         });
         this._sse.onerror = () => {
           if (this._sse) this._sse.close();
-          setTimeout(() => this.connectSSE(), 3000);
+          this._setError("Lost connection to daemon — retrying...");
+          setTimeout(() => this.connectSSE(), this._sseReconnectDelay);
+          this._sseReconnectDelay = Math.min(this._sseReconnectDelay * 2, 30000);
         };
       } catch (e) { console.warn("SSE failed", e); }
     },
@@ -184,13 +214,19 @@ function appRoot() {
 
     fmtNum(n) {
       if (n === null || n === undefined) return "—";
-      if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
-      if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
-      if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
-      return String(n);
+      const num = Number(n);
+      if (!Number.isFinite(num)) return "—";
+      if (num < 0) return String(num);  // edge: shouldn't happen but don't lose units mid-conversion
+      if (num >= 1e15) return (num / 1e15).toFixed(2) + "Q";
+      if (num >= 1e12) return (num / 1e12).toFixed(2) + "T";
+      if (num >= 1e9)  return (num / 1e9).toFixed(2) + "B";
+      if (num >= 1e6)  return (num / 1e6).toFixed(2) + "M";
+      if (num >= 1e3)  return (num / 1e3).toFixed(1) + "K";
+      return String(num);
     },
     fmtMoney(n) {
       if (n === null || n === undefined) return "—";
+      if (!Number.isFinite(Number(n))) return "—";
       return "$" + Number(n).toFixed(2);
     },
     fmtDuration(s) {
