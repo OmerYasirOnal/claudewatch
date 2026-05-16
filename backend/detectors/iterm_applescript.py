@@ -2,13 +2,14 @@
 
 Returns (window_id, tab_index, tty, unique_session_id, session_name) tuples.
 """
+
 from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import psutil
 

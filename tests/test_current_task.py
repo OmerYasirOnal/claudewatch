@@ -1,8 +1,8 @@
 """Tests for current-task tracking in conversation_log parser."""
+
 from __future__ import annotations
 
 import json
-from datetime import datetime
 
 from backend.detectors.conversation_log import parse_log
 
@@ -13,7 +13,12 @@ def _entry(idx: int, ts: str, content: list) -> str:
             "type": "assistant",
             "uuid": f"u{idx}",
             "timestamp": ts,
-            "message": {"model": "claude-opus-4-7", "content": content, "stop_reason": "tool_use", "usage": {"input_tokens": 1}},
+            "message": {
+                "model": "claude-opus-4-7",
+                "content": content,
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1},
+            },
         }
     )
 
@@ -21,9 +26,23 @@ def _entry(idx: int, ts: str, content: list) -> str:
 def test_in_progress_task_subject_captured(tmp_path):
     f = tmp_path / "t.jsonl"
     f.write_text(
-        _entry(1, "2026-01-01T00:00:00Z", [{"type": "tool_use", "name": "TaskCreate", "input": {"subject": "Run all tests", "activeForm": "Running tests"}}])
+        _entry(
+            1,
+            "2026-01-01T00:00:00Z",
+            [
+                {
+                    "type": "tool_use",
+                    "name": "TaskCreate",
+                    "input": {"subject": "Run all tests", "activeForm": "Running tests"},
+                }
+            ],
+        )
         + "\n"
-        + _entry(2, "2026-01-01T00:00:01Z", [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "in_progress"}}])
+        + _entry(
+            2,
+            "2026-01-01T00:00:01Z",
+            [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "in_progress"}}],
+        )
         + "\n"
     )
     pl = parse_log(f)
@@ -36,11 +55,21 @@ def test_in_progress_task_subject_captured(tmp_path):
 def test_in_progress_cleared_when_completed(tmp_path):
     f = tmp_path / "t.jsonl"
     f.write_text(
-        _entry(1, "2026-01-01T00:00:00Z", [{"type": "tool_use", "name": "TaskCreate", "input": {"subject": "S"}}])
+        _entry(
+            1, "2026-01-01T00:00:00Z", [{"type": "tool_use", "name": "TaskCreate", "input": {"subject": "S"}}]
+        )
         + "\n"
-        + _entry(2, "2026-01-01T00:00:01Z", [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "in_progress"}}])
+        + _entry(
+            2,
+            "2026-01-01T00:00:01Z",
+            [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "in_progress"}}],
+        )
         + "\n"
-        + _entry(3, "2026-01-01T00:00:02Z", [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "completed"}}])
+        + _entry(
+            3,
+            "2026-01-01T00:00:02Z",
+            [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "completed"}}],
+        )
         + "\n"
     )
     pl = parse_log(f)
@@ -51,15 +80,35 @@ def test_in_progress_cleared_when_completed(tmp_path):
 def test_latest_in_progress_wins(tmp_path):
     f = tmp_path / "t.jsonl"
     f.write_text(
-        _entry(1, "2026-01-01T00:00:00Z", [{"type": "tool_use", "name": "TaskCreate", "input": {"subject": "First"}}])
+        _entry(
+            1,
+            "2026-01-01T00:00:00Z",
+            [{"type": "tool_use", "name": "TaskCreate", "input": {"subject": "First"}}],
+        )
         + "\n"
-        + _entry(2, "2026-01-01T00:00:01Z", [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "in_progress"}}])
+        + _entry(
+            2,
+            "2026-01-01T00:00:01Z",
+            [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "in_progress"}}],
+        )
         + "\n"
-        + _entry(3, "2026-01-01T00:00:02Z", [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "completed"}}])
+        + _entry(
+            3,
+            "2026-01-01T00:00:02Z",
+            [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "1", "status": "completed"}}],
+        )
         + "\n"
-        + _entry(4, "2026-01-01T00:00:03Z", [{"type": "tool_use", "name": "TaskCreate", "input": {"subject": "Second"}}])
+        + _entry(
+            4,
+            "2026-01-01T00:00:03Z",
+            [{"type": "tool_use", "name": "TaskCreate", "input": {"subject": "Second"}}],
+        )
         + "\n"
-        + _entry(5, "2026-01-01T00:00:04Z", [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "2", "status": "in_progress"}}])
+        + _entry(
+            5,
+            "2026-01-01T00:00:04Z",
+            [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "2", "status": "in_progress"}}],
+        )
         + "\n"
     )
     pl = parse_log(f)
@@ -105,9 +154,7 @@ def test_not_in_flight_when_end_turn(tmp_path):
 def test_in_flight_when_stop_reason_missing(tmp_path):
     """Mid-stream entry without stop_reason yet — treat as in_flight."""
     f = tmp_path / "t.jsonl"
-    f.write_text(
-        '{"type":"assistant","message":{"model":"x","content":[],"usage":{}}}\n'
-    )
+    f.write_text('{"type":"assistant","message":{"model":"x","content":[],"usage":{}}}\n')
     pl = parse_log(f)
     assert pl.is_in_flight is True
 
@@ -116,7 +163,11 @@ def test_task_update_without_matching_create(tmp_path):
     """Resumed session: TaskUpdate references a taskId created in a prior log file."""
     f = tmp_path / "t.jsonl"
     f.write_text(
-        _entry(1, "2026-01-01T00:00:00Z", [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "99", "status": "in_progress"}}])
+        _entry(
+            1,
+            "2026-01-01T00:00:00Z",
+            [{"type": "tool_use", "name": "TaskUpdate", "input": {"taskId": "99", "status": "in_progress"}}],
+        )
         + "\n"
     )
     pl = parse_log(f)
@@ -129,7 +180,9 @@ def test_taskupdate_input_can_be_non_dict(tmp_path):
     """Schema-drift safety: don't crash if TaskUpdate input shape is unexpected."""
     f = tmp_path / "t.jsonl"
     f.write_text(
-        _entry(1, "2026-01-01T00:00:00Z", [{"type": "tool_use", "name": "TaskUpdate", "input": "weird-string"}])
+        _entry(
+            1, "2026-01-01T00:00:00Z", [{"type": "tool_use", "name": "TaskUpdate", "input": "weird-string"}]
+        )
         + "\n"
     )
     pl = parse_log(f)

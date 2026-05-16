@@ -4,7 +4,7 @@ import asyncio
 import fnmatch
 import logging
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from watchfiles import Change, awatch
@@ -40,7 +40,7 @@ class FilesystemWatcher:
 
     def get_recent(self, cwd: str, minutes: int | None = None) -> list[FileChange]:
         m = minutes if minutes is not None else self.retention_minutes
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=m)
+        cutoff = datetime.now(UTC) - timedelta(minutes=m)
         return [c for c in self.changes.get(cwd, deque()) if c.ts >= cutoff]
 
     async def sync_active_cwds(self, cwds: set[str]) -> None:
@@ -66,7 +66,7 @@ class FilesystemWatcher:
         if task:
             try:
                 await asyncio.wait_for(task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 task.cancel()
 
     async def stop_all(self) -> None:
@@ -77,7 +77,7 @@ class FilesystemWatcher:
         base = Path(cwd).resolve()
         try:
             async for changes in awatch(str(base), stop_event=stop_event, recursive=True):
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 dq = self.changes.setdefault(cwd, deque(maxlen=2000))
                 cutoff = now - timedelta(minutes=self.retention_minutes)
                 while dq and dq[0].ts < cutoff:

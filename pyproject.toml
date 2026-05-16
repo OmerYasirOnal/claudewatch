@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "httpx>=0.28"]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "httpx>=0.28", "ruff==0.8.4"]
 
 [project.scripts]
 claudewatch = "backend.cli:app"
@@ -36,3 +36,21 @@ packages = ["backend"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+# Conservative defaults — match current codebase style. Expand as we clean up.
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+  "E501",  # line length (covered by formatter)
+  "B008",  # function-call-in-default (FastAPI Depends, typer.Option)
+  "B904",  # raise ... from err (verbose, low-value here)
+  "UP006", # PEP 585 generics — keep `List[X]` style optional
+  "UP007", # use `X | Y` — already done where it matters
+]
+
+[tool.ruff.format]
+quote-style = "double"

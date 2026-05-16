@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -40,7 +40,7 @@ class State:
             await db.commit()
 
     async def upsert_active(self, session: ClaudeSession) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         total = session.usage.total_tokens if session.usage else 0
         cost = session.usage.cost_estimate_usd if session.usage else None
         summary = session.model_dump_json()
@@ -71,7 +71,7 @@ class State:
             await db.commit()
 
     async def mark_ended(self, pid: int, started_at: datetime) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "UPDATE sessions SET ended_at=? WHERE pid=? AND started_at=? AND ended_at IS NULL",
@@ -80,7 +80,7 @@ class State:
             await db.commit()
 
     async def list_history(self, hours: int = 24) -> list[dict]:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             rows = await db.execute_fetchall(
@@ -103,7 +103,7 @@ class State:
         return out
 
     async def stats_today(self) -> dict:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             row = await db.execute_fetchall(
@@ -121,7 +121,7 @@ class State:
         return dict(row[0])
 
     async def prune(self, hours: int = 48) -> None:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",

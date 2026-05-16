@@ -20,11 +20,7 @@ async def stream(request: Request):
             # Initial snapshot
             yield _sse_event(
                 "snapshot",
-                {
-                    "sessions": [
-                        sess.model_dump(mode="json") for sess in s.sessions.values()
-                    ]
-                },
+                {"sessions": [sess.model_dump(mode="json") for sess in s.sessions.values()]},
             )
             while True:
                 if await request.is_disconnected():
@@ -32,7 +28,7 @@ async def stream(request: Request):
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=15.0)
                     yield _sse_event(msg.get("event", "message"), msg)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ":keepalive\n\n"
         finally:
             s.sse_queues.discard(queue)

@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
-from backend.models import ToolCallStats, TokenUsage
+from backend.models import TokenUsage, ToolCallStats
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ def parse_log(path: Path) -> ParsedLog:
     current_in_progress: dict | None = None
     current_in_progress_started_at: datetime | None = None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -187,9 +187,7 @@ def parse_log(path: Path) -> ParsedLog:
                                         subject = None
                                         active_form = None
                                         try:
-                                            idx = int(tid)
-                                            # Heuristic: count TaskCreate calls so far; if this taskId
-                                            # equals (count of TaskCreates so far), it's the most recent create.
+                                            int(tid)  # validate format; matching by index is Bug #12
                                             if tasks_created_here:
                                                 # Best match: the last TaskCreate before this update
                                                 t = tasks_created_here[-1]
@@ -203,7 +201,11 @@ def parse_log(path: Path) -> ParsedLog:
                                             "active_form": active_form,
                                         }
                                         current_in_progress_started_at = ts
-                                    elif status in ("completed", "deleted") and current_in_progress and current_in_progress.get("id") == tid:
+                                    elif (
+                                        status in ("completed", "deleted")
+                                        and current_in_progress
+                                        and current_in_progress.get("id") == tid
+                                    ):
                                         current_in_progress = None
                                         current_in_progress_started_at = None
     except OSError as e:
@@ -220,9 +222,7 @@ def parse_log(path: Path) -> ParsedLog:
     return pl
 
 
-def parse_logs_for_cwd(
-    cwd: str, log_dir: Path | None = None, max_files: int = 3
-) -> ParsedLog | None:
+def parse_logs_for_cwd(cwd: str, log_dir: Path | None = None, max_files: int = 3) -> ParsedLog | None:
     """Return the freshest log for the cwd (highest mtime)."""
     logs = find_logs_for_cwd(cwd, log_dir)
     if not logs:

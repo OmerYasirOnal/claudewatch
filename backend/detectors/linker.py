@@ -3,9 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,6 @@ from backend.detectors.filesystem_watch import FilesystemWatcher
 from backend.detectors.git_context import get_git_context
 from backend.detectors.iterm_applescript import (
     link_pids_to_iterm_applescript,
-    list_iterm_sessions_via_applescript,
 )
 from backend.detectors.iterm_detector import link_pids_to_iterm
 from backend.detectors.process_detector import (
@@ -33,8 +31,8 @@ from backend.models import (
     ClaudeSession,
     FileChange,
     GitContext,
-    ToolCallStats,
     TokenUsage,
+    ToolCallStats,
 )
 from backend.pricing import annotate_usage
 
@@ -50,6 +48,7 @@ def _context_max_for_model(model: str | None) -> int | None:
     if model.startswith("claude-haiku-4"):
         return 200_000
     return None
+
 
 log = logging.getLogger(__name__)
 
@@ -127,7 +126,7 @@ async def build_sessions(
     file_retention = int(config.get("file_change_retention_minutes", 10))
 
     sessions: list[ClaudeSession] = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for p in procs:
         cpu_history = _update_cpu_history(state, p.pid, p.cpu_percent)

@@ -4,7 +4,7 @@ import getpass
 import os
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import psutil
@@ -126,9 +126,7 @@ class ProcInfo:
 def scan_claude_processes() -> list[ProcInfo]:
     user = getpass.getuser()
     out: list[ProcInfo] = []
-    for proc in psutil.process_iter(
-        ["pid", "ppid", "name", "cmdline", "username", "create_time"]
-    ):
+    for proc in psutil.process_iter(["pid", "ppid", "name", "cmdline", "username", "create_time"]):
         try:
             if not is_claude_process(proc, user):
                 continue
@@ -151,7 +149,7 @@ def scan_claude_processes() -> list[ProcInfo]:
                     pid=proc.pid,
                     ppid=proc.ppid(),
                     cwd=cwd,
-                    started_at=datetime.fromtimestamp(proc.info["create_time"], tz=timezone.utc),
+                    started_at=datetime.fromtimestamp(proc.info["create_time"], tz=UTC),
                     cpu_percent=float(cpu),
                     memory_mb=float(mem),
                     cmdline=cmdline,

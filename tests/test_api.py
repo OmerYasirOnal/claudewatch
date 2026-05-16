@@ -4,21 +4,16 @@ These tests don't spin up uvicorn; they instantiate the app and call routes
 directly via httpx. Lifespan runs the scheduler loop, so we suppress that by
 overriding state setup.
 """
+
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.config import DEFAULT_CONFIG, STATE_DB
-from backend.detectors.filesystem_watch import FilesystemWatcher
 from backend.models import ClaudeSession, TokenUsage, ToolCallStats
-from backend.server import AppState
-from backend.state import State
 
 
 @pytest.fixture
@@ -44,7 +39,7 @@ def app(tmp_path, monkeypatch):
 @pytest.fixture
 def populated_app(app, tmp_path):
     client, fastapi_app = app
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sess = ClaudeSession(
         pid=12345,
         cwd="/Users/me/Projects/x",
@@ -194,7 +189,7 @@ def test_log_tail_privacy_redacts_text_by_default(populated_app, tmp_path):
         '"message":{"model":"claude-opus-4-7","content":['
         '{"type":"text","text":"secret content"},'
         '{"type":"tool_use","name":"Bash","input":{"command":"echo s3cret"}}'
-        ']}}\n'
+        "]}}\n"
     )
     sess.conversation_log_path = str(log)
     r = client.get(f"/api/sessions/{sess.pid}/log-tail")
@@ -213,9 +208,7 @@ def test_log_tail_privacy_redacts_text_by_default(populated_app, tmp_path):
 def test_log_tail_shows_text_when_show_log_text_true(populated_app, tmp_path):
     client, fastapi_app, sess = populated_app
     log = tmp_path / "show.jsonl"
-    log.write_text(
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}\n'
-    )
+    log.write_text('{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}\n')
     sess.conversation_log_path = str(log)
     fastapi_app.state.s.config["show_log_text"] = True
     r = client.get(f"/api/sessions/{sess.pid}/log-tail")

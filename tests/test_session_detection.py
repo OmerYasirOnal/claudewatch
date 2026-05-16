@@ -1,6 +1,7 @@
 """Tests that don't require live psutil — they exercise is_claude_process with
 mock proc-like objects so we cover the exact code paths that decide whether a
 process is a Claude CLI session."""
+
 from __future__ import annotations
 
 import getpass
@@ -17,7 +18,7 @@ def _mk_proc(cmdline: list[str], username: str = USER) -> MagicMock:
     p = MagicMock(spec=psutil.Process)
     p.username.return_value = username
     p.cmdline.return_value = cmdline
-    p.name.return_value = (cmdline[0].split("/")[-1] if cmdline else "")
+    p.name.return_value = cmdline[0].split("/")[-1] if cmdline else ""
     return p
 
 
@@ -27,7 +28,9 @@ def test_accept_user_cli_path():
 
 
 def test_accept_anthropic_managed_path():
-    p = _mk_proc(["/Users/me/Library/Application Support/Claude/claude-code/2.1.128/claude.app/Contents/MacOS/claude"])
+    p = _mk_proc(
+        ["/Users/me/Library/Application Support/Claude/claude-code/2.1.128/claude.app/Contents/MacOS/claude"]
+    )
     assert is_claude_process(p, USER) is True
 
 

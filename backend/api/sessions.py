@@ -54,7 +54,7 @@ async def get_log_tail(pid: int, request: Request, limit: int = 20):
         return {"entries": [], "log_path": str(path)}
     entries: list[dict] = []
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 try:
                     entries.append(json.loads(line))

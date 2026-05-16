@@ -86,7 +86,7 @@ class ClaudeSession(BaseModel):
 
     # Live activity (from latest assistant turn)
     is_in_flight: bool = False
-    last_turn_tokens: int | None = None             # output tokens of the latest assistant message
+    last_turn_tokens: int | None = None  # output tokens of the latest assistant message
     last_turn_at: datetime | None = None
     last_stop_reason: str | None = None
     # Context window utilization (based on latest assistant.usage)

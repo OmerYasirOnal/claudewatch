@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import psutil
 
@@ -107,7 +107,5 @@ def link_pids_to_tmux(
         kids = _descendants(pane.pane_pid)
         matched = pid_set & kids
         for pid in matched:
-            out[pid] = TmuxLocation(
-                session=pane.session, window=pane.window, pane=pane.pane
-            )
+            out[pid] = TmuxLocation(session=pane.session, window=pane.window, pane=pane.pane)
     return out

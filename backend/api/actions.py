@@ -8,7 +8,6 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -100,9 +99,7 @@ async def new_session(body: NewSessionRequest, request: Request):
     cwd, argv = sanitize_new_session(body)
     cmd_str = shlex.join(argv)
     script_name = (
-        "new_iterm_window.applescript"
-        if body.window_type == "new-window"
-        else "new_iterm_tab.applescript"
+        "new_iterm_window.applescript" if body.window_type == "new-window" else "new_iterm_tab.applescript"
     )
     script_path = APPLESCRIPT_DIR / script_name
     try:

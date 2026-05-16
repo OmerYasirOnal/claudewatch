@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from pathlib import Path
 
 from backend.detectors.conversation_log import find_log_dir
 from backend.models import HealthReport
@@ -10,12 +9,12 @@ from backend.models import HealthReport
 
 async def probe_iterm_api(timeout: float = 2.0) -> bool:
     try:
-        import iterm2  # type: ignore
+        import iterm2  # type: ignore  # noqa: F401
     except ImportError:
         return False
     try:
         return await asyncio.wait_for(_probe_iterm_inner(), timeout=timeout)
-    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+    except (TimeoutError, Exception):  # noqa: BLE001
         return False
 
 
@@ -48,9 +47,7 @@ async def health_report() -> HealthReport:
     log_dir = find_log_dir()
     issues: list[str] = []
     if not iterm_ok:
-        issues.append(
-            "iTerm2 Python API not reachable — enable it in iTerm2 Settings → General → Magic"
-        )
+        issues.append("iTerm2 Python API not reachable — enable it in iTerm2 Settings → General → Magic")
     if not log_dir:
         issues.append("Conversation log directory not found — token/tool stats unavailable")
     return HealthReport(

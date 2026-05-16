@@ -17,19 +17,13 @@ def test_cwd_to_project_folder_username_with_dot():
     # macOS Active Directory accounts and similar identity providers commonly
     # produce usernames with a dot (e.g. `first.last`). Claude Code encodes
     # `.` as `-` in the project folder name, matching its `/` handling.
-    assert (
-        cwd_to_project_folder("/Users/s.onal/Projects/claudewatch")
-        == "-Users-s-onal-Projects-claudewatch"
-    )
+    assert cwd_to_project_folder("/Users/s.onal/Projects/claudewatch") == "-Users-s-onal-Projects-claudewatch"
 
 
 def test_cwd_to_project_folder_dotted_directory():
     # Hidden directories like `.claude` and dotted folder names must be encoded
     # the same way Claude Code stores them on disk.
-    assert (
-        cwd_to_project_folder("/Users/x/.claude/worktrees/repo")
-        == "-Users-x--claude-worktrees-repo"
-    )
+    assert cwd_to_project_folder("/Users/x/.claude/worktrees/repo") == "-Users-x--claude-worktrees-repo"
 
 
 def test_find_logs_for_cwd_with_dotted_username(tmp_path):

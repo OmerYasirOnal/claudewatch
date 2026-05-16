@@ -19,7 +19,12 @@ def test_multi_assistant_sums_cache():
 
 def test_total_tokens_property():
     pl = parse_log(FIXTURE)
-    expected = pl.usage.input_tokens + pl.usage.output_tokens + pl.usage.cache_read_input_tokens + pl.usage.cache_creation_input_tokens
+    expected = (
+        pl.usage.input_tokens
+        + pl.usage.output_tokens
+        + pl.usage.cache_read_input_tokens
+        + pl.usage.cache_creation_input_tokens
+    )
     assert pl.usage.total_tokens == expected
 
 
@@ -63,9 +68,7 @@ def test_missing_usage_treated_as_zero(tmp_path):
 
 def test_string_usage_values_treated_as_zero(tmp_path):
     f = tmp_path / "weird.jsonl"
-    f.write_text(
-        '{"type":"assistant","message":{"model":"x","content":[],"usage":{"input_tokens":null}}}\n'
-    )
+    f.write_text('{"type":"assistant","message":{"model":"x","content":[],"usage":{"input_tokens":null}}}\n')
     pl = parse_log(f)
     assert pl.usage.input_tokens == 0
 

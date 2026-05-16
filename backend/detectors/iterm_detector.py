@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import psutil
 
@@ -40,7 +40,7 @@ async def list_iterm_sessions(timeout: float = 3.0) -> list[ItermSessionInfo]:
         return []
     try:
         return await asyncio.wait_for(_list_iterm_sessions_inner(), timeout=timeout)
-    except (asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+    except (TimeoutError, Exception) as e:  # noqa: BLE001
         log.debug("iTerm enumeration failed: %s", e)
         return []
 
@@ -65,9 +65,7 @@ async def _list_iterm_sessions_inner() -> list[ItermSessionInfo]:
                     tab_id = 0
                 tab_title = ""
                 try:
-                    tab_title = (
-                        await tab.async_get_variable("title") or ""
-                    )
+                    tab_title = await tab.async_get_variable("title") or ""
                 except Exception:
                     pass
                 for session in tab.sessions:
@@ -121,9 +119,7 @@ async def link_pids_to_iterm(
         sessions = await list_iterm_sessions()
     if not sessions:
         return {}
-    jobpid_to_session: dict[int, ItermSessionInfo] = {
-        s.job_pid: s for s in sessions if s.job_pid is not None
-    }
+    jobpid_to_session: dict[int, ItermSessionInfo] = {s.job_pid: s for s in sessions if s.job_pid is not None}
     out: dict[int, ItermLocation] = {}
     for pid in claude_pids:
         if pid in jobpid_to_session:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,11 +24,16 @@ def _proc(pid: int, cwd: str, model: str | None = None, session_id: str | None =
         pid=pid,
         ppid=1,
         cwd=cwd,
-        started_at=datetime(2026, 5, 12, 10, 0, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 12, 10, 0, 0, tzinfo=UTC),
         cpu_percent=0.0,
         memory_mb=200.0,
         cmdline=cmdline,
-        cmdline_parsed={"model": model, "permission_mode_flag": None, "session_id": session_id, "extra_flags": []},
+        cmdline_parsed={
+            "model": model,
+            "permission_mode_flag": None,
+            "session_id": session_id,
+            "extra_flags": [],
+        },
     )
 
 
@@ -51,10 +56,12 @@ async def test_build_sessions_with_log_match(isolated_log_dir, monkeypatch):
     state = LinkerState()
     state.log_dir = log_dir
 
-    with patch("backend.detectors.linker.scan_claude_processes", return_value=procs), \
-         patch("backend.detectors.linker.link_pids_to_tmux", return_value={}), \
-         patch("backend.detectors.linker.link_pids_to_iterm", return_value={}), \
-         patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}):
+    with (
+        patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
+        patch("backend.detectors.linker.link_pids_to_tmux", return_value={}),
+        patch("backend.detectors.linker.link_pids_to_iterm", return_value={}),
+        patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}),
+    ):
         sessions = await build_sessions(DEFAULT_CONFIG, state)
 
     assert len(sessions) == 1
@@ -82,10 +89,12 @@ async def test_build_sessions_with_tmux_location(isolated_log_dir):
     state.log_dir = log_dir
     tmux_map = {1234: TmuxLocation(session="main", window="0", pane="1")}
 
-    with patch("backend.detectors.linker.scan_claude_processes", return_value=procs), \
-         patch("backend.detectors.linker.link_pids_to_tmux", return_value=tmux_map), \
-         patch("backend.detectors.linker.link_pids_to_iterm", return_value={}), \
-         patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}):
+    with (
+        patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
+        patch("backend.detectors.linker.link_pids_to_tmux", return_value=tmux_map),
+        patch("backend.detectors.linker.link_pids_to_iterm", return_value={}),
+        patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}),
+    ):
         sessions = await build_sessions(DEFAULT_CONFIG, state)
 
     s = sessions[0]
@@ -110,10 +119,12 @@ async def test_build_sessions_disambiguates_two_pids_same_cwd(tmp_path):
     state = LinkerState()
     state.log_dir = tmp_path
 
-    with patch("backend.detectors.linker.scan_claude_processes", return_value=procs), \
-         patch("backend.detectors.linker.link_pids_to_tmux", return_value={}), \
-         patch("backend.detectors.linker.link_pids_to_iterm", return_value={}), \
-         patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}):
+    with (
+        patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
+        patch("backend.detectors.linker.link_pids_to_tmux", return_value={}),
+        patch("backend.detectors.linker.link_pids_to_iterm", return_value={}),
+        patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}),
+    ):
         sessions = await build_sessions(DEFAULT_CONFIG, state)
 
     by_pid = {s.pid: s for s in sessions}
@@ -130,10 +141,12 @@ async def test_build_sessions_no_log_gracefully(tmp_path):
     state = LinkerState()
     state.log_dir = tmp_path
 
-    with patch("backend.detectors.linker.scan_claude_processes", return_value=procs), \
-         patch("backend.detectors.linker.link_pids_to_tmux", return_value={}), \
-         patch("backend.detectors.linker.link_pids_to_iterm", return_value={}), \
-         patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}):
+    with (
+        patch("backend.detectors.linker.scan_claude_processes", return_value=procs),
+        patch("backend.detectors.linker.link_pids_to_tmux", return_value={}),
+        patch("backend.detectors.linker.link_pids_to_iterm", return_value={}),
+        patch("backend.detectors.linker.link_pids_to_iterm_applescript", return_value={}),
+    ):
         sessions = await build_sessions(DEFAULT_CONFIG, state)
 
     s = sessions[0]
