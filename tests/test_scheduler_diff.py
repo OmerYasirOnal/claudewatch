@@ -172,7 +172,7 @@ def test_session_hash_ignores_duration_seconds():
 def test_session_hash_ignores_last_activity_at():
     sess = _mk_sess(pid=1)
     base_hash = _session_hash(sess)
-    sess.last_activity_at = datetime(2099, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess.last_activity_at = datetime(2099, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     assert _session_hash(sess) == base_hash
 
 
@@ -211,7 +211,7 @@ async def test_emit_diffs_skips_update_when_only_volatile_fields_change():
     sess2.cpu_percent = 88.0
     sess2.memory_mb = 4096.0
     sess2.duration_seconds = sess1.duration_seconds + 60
-    sess2.last_activity_at = datetime(2030, 1, 1, tzinfo=UTC)
+    sess2.last_activity_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
     sess2.current_task_elapsed_seconds = 42
     await _emit_diffs(s, [sess2])
     assert events == []
