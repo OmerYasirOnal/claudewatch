@@ -80,3 +80,45 @@ def test_parse_log_handles_malformed_lines(tmp_path):
     assert pl.model == "claude-opus-4-7"
     assert pl.usage.input_tokens == 10
     assert pl.message_count == 2
+
+
+def test_parse_log_handles_non_numeric_tokens(tmp_path):
+    """Issue #29: malformed `usage.*_tokens` (string, dict, etc.) must NOT crash
+    the parser — the offending field is treated as 0, everything else still
+    aggregates."""
+    f = tmp_path / "weird.jsonl"
+    f.write_text(
+        '{"type":"assistant","message":{"model":"claude-opus-4-7",'
+        '"usage":{"input_tokens":"not a number","output_tokens":5,'
+        '"cache_read_input_tokens":null,"cache_creation_input_tokens":{"x":1}},'
+        '"content":[]}}\n'
+        '{"type":"assistant","message":{"model":"claude-opus-4-7",'
+        '"usage":{"input_tokens":7,"output_tokens":2},"content":[]}}\n'
+    )
+    pl = parse_log(f)
+    # Garbage fields contribute 0; well-formed siblings still count.
+    assert pl.usage.input_tokens == 7
+    assert pl.usage.output_tokens == 7
+    assert pl.usage.cache_read_input_tokens == 0
+    assert pl.usage.cache_creation_input_tokens == 0
+    assert pl.message_count == 2
+
+
+def test_parse_log_normalizes_naive_timestamps(tmp_path):
+    """Issue #46: a JSONL row with an offset-less timestamp must parse to a
+    tz-aware datetime (assumed UTC), so `(now - last_activity_at)` math
+    elsewhere in the codebase doesn't raise the "can't subtract naive and
+    aware" TypeError."""
+    f = tmp_path / "naive.jsonl"
+    # Note: NO `Z`, NO `+00:00` — a naive ISO timestamp.
+    f.write_text(
+        '{"type":"user","timestamp":"2026-01-01T00:00:00","cwd":"/a"}\n'
+        '{"type":"assistant","timestamp":"2026-01-01T00:00:05",'
+        '"message":{"model":"claude-opus-4-7","usage":{"input_tokens":1,'
+        '"output_tokens":1},"content":[]}}\n'
+    )
+    pl = parse_log(f)
+    assert pl.last_activity_at is not None
+    assert pl.last_activity_at.tzinfo is not None
+    assert pl.last_assistant_at is not None
+    assert pl.last_assistant_at.tzinfo is not None
