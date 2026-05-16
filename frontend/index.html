@@ -19,9 +19,9 @@
         <span class="text-xs text-zinc-500 ml-1">v0.2.0</span>
       </div>
       <div class="flex items-center gap-2 text-xs ml-2">
-        <span class="px-2 py-0.5 rounded-full border" :class="health.iterm_api ? 'border-emerald-500/40 text-emerald-300' : 'border-amber-500/40 text-amber-300'">iTerm <span x-text="health.iterm_api ? '✓' : '✗'"></span></span>
-        <span class="px-2 py-0.5 rounded-full border" :class="health.tmux_available ? 'border-emerald-500/40 text-emerald-300' : 'border-zinc-700 text-zinc-400'">tmux <span x-text="health.tmux_available ? '✓' : '✗'"></span></span>
-        <span class="px-2 py-0.5 rounded-full border" :class="health.log_dir_found ? 'border-emerald-500/40 text-emerald-300' : 'border-amber-500/40 text-amber-300'">logs <span x-text="health.log_dir_found ? '✓' : '✗'"></span></span>
+        <span class="px-2 py-0.5 rounded-full border" :class="health.iterm_api === null ? 'border-zinc-700 text-zinc-400' : (health.iterm_api ? 'border-emerald-500/40 text-emerald-300' : 'border-amber-500/40 text-amber-300')">iTerm <span x-text="health.iterm_api === null ? '…' : (health.iterm_api ? '✓' : '✗')"></span></span>
+        <span class="px-2 py-0.5 rounded-full border" :class="health.tmux_available === null ? 'border-zinc-700 text-zinc-400' : (health.tmux_available ? 'border-emerald-500/40 text-emerald-300' : 'border-zinc-700 text-zinc-400')">tmux <span x-text="health.tmux_available === null ? '…' : (health.tmux_available ? '✓' : '✗')"></span></span>
+        <span class="px-2 py-0.5 rounded-full border" :class="health.log_dir_found === null ? 'border-zinc-700 text-zinc-400' : (health.log_dir_found ? 'border-emerald-500/40 text-emerald-300' : 'border-amber-500/40 text-amber-300')">logs <span x-text="health.log_dir_found === null ? '…' : (health.log_dir_found ? '✓' : '✗')"></span></span>
       </div>
       <nav class="flex items-center gap-1 ml-4 text-sm">
         <button class="px-3 py-1.5 rounded-md" :class="view==='dashboard' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'" @click="view='dashboard'">Dashboard</button>

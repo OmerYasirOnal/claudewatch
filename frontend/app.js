@@ -4,7 +4,7 @@ function appRoot() {
     sessions: [],
     history: [],
     stats: {},
-    health: { iterm_api: true, tmux_available: true, log_dir_found: true, issues: [] },
+    health: { iterm_api: null, tmux_available: null, log_dir_found: null, issues: [] },
     config: { pricing: {} },
     filter: "All",
     filters: ["All", "iTerm", "Tmux", "Headless", "Working", "Idle", "High-cost"],
