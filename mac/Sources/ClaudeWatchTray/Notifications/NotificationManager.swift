@@ -58,10 +58,17 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
     /// Read the current authorization state without prompting. Used to keep
     /// the Settings UI in sync when the user toggles permissions in System
     /// Settings while the app is running.
+    ///
+    /// `UNNotificationSettings` is not Sendable, so we bridge through a
+    /// nonisolated continuation-style call and only carry the resolved status
+    /// enum back across the MainActor boundary.
     func refreshAuthorizationStatus() async {
-        let settings = await UNUserNotificationCenter.current().notificationSettings()
-        authorized = (settings.authorizationStatus == .authorized
-                      || settings.authorizationStatus == .provisional)
+        let status: UNAuthorizationStatus = await withCheckedContinuation { cont in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                cont.resume(returning: settings.authorizationStatus)
+            }
+        }
+        authorized = (status == .authorized || status == .provisional)
     }
 
     // MARK: - Pause control
