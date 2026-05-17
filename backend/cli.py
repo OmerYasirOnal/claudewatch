@@ -387,6 +387,51 @@ def uninstall_daemon() -> None:
 
 
 @app.command()
+def doctor(
+    json_out: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+) -> None:
+    """Run self-diagnostic checks and report issues.
+
+    Exits 0 when no check failed (warnings are non-fatal), 1 otherwise. Pass
+    ``--json`` for a stable, scriptable output shape — useful for shipping the
+    output to a bug report.
+    """
+    from backend import doctor as doctor_mod
+
+    results = doctor_mod.run_checks()
+
+    if json_out:
+        # Use stdlib json (not console.print_json) so the output is byte-for-byte
+        # what scripts can pipe through `jq` / `python -m json.tool` without
+        # rich's color escapes.
+        typer.echo(json.dumps(doctor_mod.to_json(results), indent=2))
+        raise typer.Exit(0 if doctor_mod.overall_ok(results) else 1)
+
+    # Human-readable output. Match the existing CLI's rich-markup style.
+    _STATUS_BADGES = {
+        "ok": "[green][OK][/green]",
+        "warn": "[yellow][WARN][/yellow]",
+        "fail": "[red][FAIL][/red]",
+    }
+    for r in results:
+        badge = _STATUS_BADGES[r.status]
+        console.print(f"{badge} {r.name}: {r.detail}")
+        if r.hint:
+            console.print(f"      → {r.hint}")
+    fails = sum(1 for r in results if r.status == "fail")
+    warns = sum(1 for r in results if r.status == "warn")
+    oks = sum(1 for r in results if r.status == "ok")
+    summary = f"\n{oks} ok · {warns} warn · {fails} fail"
+    if fails:
+        console.print(f"[red]{summary}[/red]")
+        raise typer.Exit(1)
+    if warns:
+        console.print(f"[yellow]{summary}[/yellow]")
+        raise typer.Exit(0)
+    console.print(f"[green]{summary}[/green]")
+
+
+@app.command()
 def uninstall() -> None:
     """Remove ~/.claudewatch/ data (does NOT remove the package)."""
     import shutil
