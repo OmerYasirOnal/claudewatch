@@ -66,6 +66,13 @@ async def forecast(
     return a zeroed response (same shape, so the UI degrades gracefully).
     The frontend already hides the forecast card in that case; this is
     defense-in-depth for direct API consumers.
+
+    Negative ``cost_estimate`` rows (e.g. corrupted historical entries, refund
+    adjustments, or out-of-tree DB writes) are clamped to zero at the SQL
+    layer via ``CASE WHEN cost_estimate > 0 ...``. ``observed_cost_usd`` and
+    all projection fields are therefore guaranteed to be ``>= 0`` regardless
+    of the underlying row contents — see issue #125. If the clamped sum is
+    zero, ``hourly_rate_usd`` and every projection collapse to ``0.0``.
     """
     s = _state(request)
     # Default to "api" when no plan is configured (matches DEFAULT_CONFIG).
@@ -76,13 +83,14 @@ async def forecast(
         return _empty(window_hours)
 
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
-    # SUM/COUNT aggregates always return exactly one row (NULL/0 on an empty
-    # input), so ``rows`` is guaranteed length 1. COALESCE(SUM(...), 0) guards
-    # against NULL when the table has no matching rows; no need for a fallback
-    # branch on ``not rows``.
+    # Issue #125: clamp negative cost_estimate rows to 0 inside the aggregation
+    # so a single bad row can't drive the entire projection negative. We also
+    # belt-and-suspenders with `max(0.0, ...)` below in case a future SQL
+    # rewrite drops the CASE. #128: SUM/COUNT always returns exactly one row
+    # (NULL/0 on empty input) — no need for a `if not rows` fallback branch.
     rows = await s.state._conn.execute_fetchall(
         """
-        SELECT COALESCE(SUM(cost_estimate), 0) AS cost,
+        SELECT COALESCE(SUM(CASE WHEN cost_estimate > 0 THEN cost_estimate ELSE 0 END), 0) AS cost,
                COUNT(*) AS n
         FROM sessions
         WHERE ended_at IS NOT NULL AND ended_at >= ?
@@ -90,7 +98,7 @@ async def forecast(
         (cutoff,),
     )
     row = dict(rows[0])
-    observed_cost = float(row.get("cost") or 0.0)
+    observed_cost = max(0.0, float(row.get("cost") or 0.0))
     observed_count = int(row.get("n") or 0)
     hourly_rate = observed_cost / float(window_hours) if window_hours > 0 else 0.0
 

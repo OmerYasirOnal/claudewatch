@@ -12,16 +12,26 @@ router = APIRouter(prefix="/api")
 @router.get("/stream")
 async def stream(request: Request):
     s = request.app.state.s
-    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
-    s.sse_queues.add(queue)
-    # Surface live subscriber count for /api/metrics. Kept on AppState.metrics
-    # if present so legacy AppState instances (e.g. older tests) don't blow up.
+    # Issue #123: the increment + queue insertion used to live in the handler
+    # body, *before* StreamingResponse was returned. If Starlette discarded the
+    # response without ever iterating the generator (client disconnect between
+    # handler return and body iteration, middleware exception, etc.) the
+    # decrement in gen()'s finally never ran — `sse_subscribers` drifted
+    # upward and dead queues accumulated in `sse_queues`. Moving the
+    # registration into the generator's try-block guarantees the matched
+    # finally always runs because the generator's lifecycle is owned by
+    # Starlette's StreamingResponse iteration.
     _metrics = getattr(s, "metrics", None)
-    if _metrics is not None:
-        _metrics.sse_subscribers += 1
 
     async def gen():
+        # Registration lives INSIDE the try block so the matching `finally`
+        # is guaranteed to run for every code path — including the case
+        # where Starlette closes the generator before the first yield.
+        queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         try:
+            s.sse_queues.add(queue)
+            if _metrics is not None:
+                _metrics.sse_subscribers += 1
             # Initial snapshot
             yield _sse_event(
                 "snapshot",
