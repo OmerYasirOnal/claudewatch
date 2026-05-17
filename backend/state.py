@@ -217,6 +217,53 @@ class State:
             )
         return bins
 
+    async def hourly_cost(self, hours: int = 168) -> list[dict]:
+        """Return one bin per hour with summed cost + session_count.
+
+        Bins are attributed by ``ended_at`` (cost is final at session end,
+        matching ``hourly_history``). Continuous time axis — empty hours are
+        emitted as zero-valued bins so callers can render without gaps.
+
+        Each bin:
+          * ``hour_start`` — ISO 8601 UTC string of the bin's start.
+          * ``cost_usd`` — SUM(cost_estimate) for sessions ended in the bin.
+          * ``session_count`` — COUNT(*) of sessions ended in the bin.
+        """
+        await self.connect()
+        assert self._conn is not None
+        # Mirror prune()'s clamp so a bad caller can't blow up timedelta.
+        hours = min(max(int(hours), 1), 24 * 365 * 100)
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        start = now - timedelta(hours=hours - 1)
+        cutoff = start.isoformat()
+
+        rows = await self._conn.execute_fetchall(
+            """
+            SELECT substr(ended_at, 1, 13) AS hour_key,
+                   COALESCE(SUM(cost_estimate), 0) AS cost,
+                   COUNT(*) AS n
+            FROM sessions
+            WHERE ended_at IS NOT NULL AND ended_at >= ?
+            GROUP BY hour_key
+            """,
+            (cutoff,),
+        )
+        ended_map: dict[str, dict] = {dict(r)["hour_key"]: dict(r) for r in rows}
+
+        bins: list[dict] = []
+        for i in range(hours):
+            bin_start = start + timedelta(hours=i)
+            hour_key = bin_start.strftime("%Y-%m-%dT%H")
+            ended = ended_map.get(hour_key, {})
+            bins.append(
+                {
+                    "hour_start": bin_start.isoformat(),
+                    "cost_usd": round(float(ended.get("cost", 0.0) or 0.0), 6),
+                    "session_count": int(ended.get("n", 0) or 0),
+                }
+            )
+        return bins
+
     async def stats_today(self) -> dict:
         """Aggregate counts/sums over rows whose ``last_seen`` falls in the last 24h."""
         await self.connect()

@@ -36,6 +36,10 @@ function appRoot() {
     // Cost forecast (Insights tab)
     forecastData: null,
 
+    // Hourly cost trend (Insights tab — bar chart, last 7d)
+    hourlyCostData: null,
+    hourlyCostError: null,
+
     // F3 - Search
     searchQuery: "",
     _searchDebounce: null,
@@ -124,6 +128,7 @@ function appRoot() {
       await Promise.all([this.loadHealth(), this.loadSessions(), this.loadStats(), this.loadConfig()]);
       // Prime the forecast card so it has data the first time the user opens Insights.
       this.loadForecast();
+      this.loadHourlyCost(168);
       this.connectSSE();
       this._startNowTimer();
       this._installKeydown();
@@ -438,6 +443,61 @@ function appRoot() {
       return this.showCost() && this.cardVisibility.cost !== false;
     },
 
+    // Hourly cost trend (Insights tab) — bar chart of last 7d of ended-session cost.
+    async loadHourlyCost(hours = 168) {
+      const h = Number(hours) || 168;
+      let r;
+      try {
+        r = await fetch(`/api/history/hourly-cost?hours=${h}`);
+        if (r && r.ok) {
+          const data = await r.json();
+          if (data && typeof data === "object") {
+            this.hourlyCostData = {
+              hours: Number(data.hours) || h,
+              bins: Array.isArray(data.bins) ? data.bins : [],
+              total_cost_usd: Number(data.total_cost_usd) || 0,
+            };
+            this.hourlyCostError = null;
+            this.$nextTick && this.$nextTick(() => this._renderHourlyCostChart());
+            setTimeout(() => this._renderHourlyCostChart(), 50);
+          }
+          return;
+        }
+        this.hourlyCostError = `Failed to load /api/history/hourly-cost: HTTP ${r?.status ?? "???"}`;
+      } catch (e) {
+        this.hourlyCostError = "Network error loading hourly cost";
+      }
+    },
+    _renderHourlyCostChart() {
+      const canvas = document.getElementById("hourly-cost-bar");
+      if (!canvas) return;
+      const bins = (this.hourlyCostData && this.hourlyCostData.bins) || [];
+      // Label by hour-of-day with a "MM-DD HH" hint every Nth tick (the
+      // drawBarChart label stride keeps it readable). Keep the label compact
+      // so the existing axis renderer doesn't run out of room.
+      const data = bins.map((b) => {
+        const iso = b.hour_start || "";
+        // ISO is "YYYY-MM-DDTHH:00:00+00:00" → "MM-DD HH" is informative
+        // without overflowing the tick width.
+        const md = iso.slice(5, 10);
+        const hh = iso.slice(11, 13);
+        return {
+          label: hh ? `${md} ${hh}` : iso,
+          value: Number(b.cost_usd) || 0,
+        };
+      });
+      this.drawBarChart(canvas, data);
+    },
+    hourlyCostSummary() {
+      const d = this.hourlyCostData;
+      if (!d || !Array.isArray(d.bins)) return "";
+      const total = Number(d.total_cost_usd) || 0;
+      const hours = Number(d.hours) || d.bins.length;
+      const sessions = d.bins.reduce((s, b) => s + (Number(b.session_count) || 0), 0);
+      const sessLabel = `${sessions} session${sessions === 1 ? "" : "s"}`;
+      return `Total: ${this.fmtMoney(total)} over ${hours} hours · ${sessLabel}`;
+    },
+
     // F2 - Insights data
     async loadInsights() {
       try {
@@ -467,8 +527,13 @@ function appRoot() {
       if (v === "insights") {
         this.loadInsights();
         this.loadForecast();
+        this.loadHourlyCost(168);
         if (this._insightsTimer) clearInterval(this._insightsTimer);
-        this._insightsTimer = setInterval(() => { this.loadInsights(); this.loadForecast(); }, 30000);
+        this._insightsTimer = setInterval(() => {
+          this.loadInsights();
+          this.loadForecast();
+          this.loadHourlyCost(168);
+        }, 30000);
       } else {
         if (this._insightsTimer) { clearInterval(this._insightsTimer); this._insightsTimer = null; }
       }
