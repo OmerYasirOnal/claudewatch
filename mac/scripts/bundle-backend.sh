@@ -75,9 +75,19 @@ install_into() {
         ( cd "${host_sp}" && tar -cf - . ) | ( cd "${dest_sp}" && tar -xf - )
         # Warn (loudly) if any platform-specific wheels slipped in — those won't
         # be importable on the foreign arch and we want to know.
+        #
+        # Issue #124: the old form had two bugs:
+        #   1. `find -name '*.dylib' -o -name '*.so'` without explicit parens
+        #      binds the implicit -print to only the rightmost clause, so
+        #      .dylib files were silently skipped from the scan.
+        #   2. `xargs -I{} sh -c 'file "{}"'` re-parses the path through the
+        #      shell — a pathname with a quote / backtick / $ would break
+        #      out of the inner quoting.
+        # The fix uses explicit parens for correct precedence, and `-exec
+        # file {} +` to invoke `file(1)` directly without involving a shell,
+        # which is both safer and faster (no per-file fork).
         local foreign_libs
-        foreign_libs="$(find "${dest_sp}" -name '*.dylib' -o -name '*.so' 2>/dev/null \
-            | xargs -I{} sh -c 'file "{}" 2>/dev/null' 2>/dev/null \
+        foreign_libs="$(find "${dest_sp}" \( -name '*.dylib' -o -name '*.so' \) -exec file {} + 2>/dev/null \
             | grep -v "${arch_suffix}" \
             | grep -E 'Mach-O|dynamically linked' || true)"
         if [ -n "${foreign_libs}" ]; then
