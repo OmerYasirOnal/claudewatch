@@ -30,7 +30,10 @@ final class ChatViewModel: ObservableObject {
     @Published var entries: [ChatEntry] = []
     @Published var draft: String = ""
     @Published var lastError: String?
-    @Published var sending: Bool = false
+    /// True while a send-text request is in flight. The composer button reads
+    /// this to flip into a "sending…" state and disable itself, so the user
+    /// can't fire a second POST while the first one is still awaiting.
+    @Published var isSending: Bool = false
     @Published var remoteEnabled: Bool = false
     @Published var privacyRedacted: Bool = false
     @Published var connectionState: ConnectionState = .connecting
@@ -52,12 +55,21 @@ final class ChatViewModel: ObservableObject {
     private let logger = Logger(subsystem: "com.omeryasironal.claudewatch.tray",
                                 category: "ChatViewModel")
 
-    init(session: Session, port: Int = APIClient.defaultPort) {
+    /// Designated initializer. Accepts a pre-built `APIClient` so tests can
+    /// inject one wired to a mocked URLSession (mirrors SettingsViewModel).
+    init(session: Session, api: APIClient, port: Int = APIClient.defaultPort) {
         self.pid = session.pid
         self.projectName = session.projectName
         self.model = session.model
-        self.api = APIClient(port: port)
+        self.api = api
         self.port = port
+    }
+
+    /// Convenience init used by production code: builds the APIClient from
+    /// the given port. Kept separate so the existing `ChatViewModel(session:)`
+    /// callsite in `ChatWindowController` doesn't have to know about APIClient.
+    convenience init(session: Session, port: Int = APIClient.defaultPort) {
+        self.init(session: session, api: APIClient(port: port), port: port)
     }
 
     deinit {
@@ -321,8 +333,12 @@ final class ChatViewModel: ObservableObject {
         }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        sending = true
-        defer { sending = false }
+        // Bail if a previous send is still in flight: keyboard-shortcut spam
+        // and a button-click can race during the await below, and the backend
+        // rate-limits send-text aggressively.
+        guard !isSending else { return }
+        isSending = true
+        defer { isSending = false }
         do {
             try await api.sendText(pid: pid, text: text, submit: true)
             draft = ""
