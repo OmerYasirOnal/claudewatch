@@ -470,3 +470,96 @@ def test_cli_doctor_human_output(tmp_path, monkeypatch):
     assert "[OK]" in result.output
     # Summary footer like "N ok · M warn · K fail"
     assert "ok" in result.output
+
+
+# --- #144: home-path collapse in detail/hint --------------------------------
+
+
+def test_friendly_collapses_home_prefix(monkeypatch, tmp_path):
+    """``_friendly`` replaces the user's home dir prefix with ``~``."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: fake_home))
+
+    assert doctor._friendly(fake_home / ".claudewatch") == f"~{os.sep}.claudewatch"
+    assert doctor._friendly(fake_home) == "~"
+    # Paths outside home are returned verbatim.
+    outside = tmp_path / "elsewhere" / "x"
+    assert doctor._friendly(outside) == str(outside)
+
+
+def test_check_config_dir_missing_uses_friendly_path(monkeypatch, tmp_path):
+    """When config_dir is missing under HOME, detail collapses to ``~/...``."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: fake_home))
+
+    # Build paths that *look* like they live under HOME but don't actually exist.
+    paths = doctor.DoctorPaths(
+        config_dir=fake_home / ".claudewatch",
+        config_path=fake_home / ".claudewatch" / "config.toml",
+        state_db=fake_home / ".claudewatch" / "state.db",
+        pid_file=fake_home / ".claudewatch" / "server.pid",
+        claude_log_dir=fake_home / ".claude" / "projects",
+    )
+    r = doctor.check_config_dir(paths)
+    assert r.status == "fail"
+    assert "~" in r.detail
+    assert str(fake_home) not in r.detail
+
+
+def test_check_config_file_hint_uses_friendly_path(monkeypatch, tmp_path):
+    """The hint about chmod must not leak the absolute home prefix."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    cfg_dir = fake_home / ".claudewatch"
+    cfg_dir.mkdir()
+    cfg = cfg_dir / "config.toml"
+    cfg.write_text("port=7788")
+    # Drop read permission so check_config_file hits the "not readable" branch.
+    os.chmod(cfg, 0)
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: fake_home))
+    try:
+        paths = doctor.DoctorPaths(
+            config_dir=cfg_dir,
+            config_path=cfg,
+            state_db=cfg_dir / "state.db",
+            pid_file=cfg_dir / "server.pid",
+            claude_log_dir=fake_home / ".claude" / "projects",
+        )
+        # Some sandboxes still let root read mode-0 files; only meaningful if access truly denied.
+        if os.access(cfg, os.R_OK):
+            pytest.skip("filesystem ignores mode bits in this environment")
+        r = doctor.check_config_file(paths)
+        assert r.status == "fail"
+        assert r.hint is not None
+        assert "~" in r.hint
+        assert str(fake_home) not in r.hint
+        assert str(fake_home) not in r.detail
+    finally:
+        os.chmod(cfg, 0o600)
+
+
+def test_check_pid_file_stale_hint_uses_friendly_path(monkeypatch, tmp_path):
+    """Stale-PID hint (`rm <path>`) must use ``~`` not the absolute home path."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    cfg_dir = fake_home / ".claudewatch"
+    cfg_dir.mkdir()
+    pid_file = cfg_dir / "server.pid"
+    pid_file.write_text("99999999")  # unlikely to exist
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: fake_home))
+
+    paths = doctor.DoctorPaths(
+        config_dir=cfg_dir,
+        config_path=cfg_dir / "config.toml",
+        state_db=cfg_dir / "state.db",
+        pid_file=pid_file,
+        claude_log_dir=fake_home / ".claude" / "projects",
+    )
+    r = doctor.check_pid_file(paths)
+    assert r.status == "warn"
+    assert r.hint is not None
+    assert "~" in r.hint
+    assert str(fake_home) not in r.detail
+    assert str(fake_home) not in r.hint
