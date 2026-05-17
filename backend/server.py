@@ -42,6 +42,7 @@ from backend.api import (
     health,
     history,
     insights,
+    metrics,
     sessions,
     stream,
 )
@@ -94,6 +95,30 @@ _APPLESCRIPT_MIN_INTERVAL_SECONDS = 30.0
 
 
 @dataclass
+class Metrics:
+    """Internal counters/gauges exposed via /api/metrics.
+
+    All counters are monotonically non-decreasing for the lifetime of the
+    process; gauges (``sse_subscribers``, ``process_scan_last_count``) reflect
+    the most recent observation. Durations are tracked in milliseconds using
+    ``time.monotonic()`` deltas, which (unlike ``time.time()``) cannot move
+    backwards via NTP / DST adjustments — important for the ``..._max`` field.
+    """
+
+    scheduler_ticks_total: int = 0
+    scheduler_tick_duration_ms_sum: float = 0.0
+    scheduler_tick_duration_ms_max: float = 0.0
+    iterm_refresh_total: int = 0
+    iterm_refresh_duration_ms_sum: float = 0.0
+    iterm_refresh_failures_total: int = 0
+    broadcasts_total: int = 0
+    sse_subscribers: int = 0  # gauge, not counter
+    detector_failures_total: int = 0
+    process_scan_last_count: int = 0
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
 class AppState:
     config: dict[str, Any]
     sessions: dict[int, ClaudeSession] = field(default_factory=dict)
@@ -131,8 +156,12 @@ class AppState:
     # pruned on each request. Lives on AppState so the bucket persists across
     # requests but is reset between daemon restarts.
     send_text_rate: dict[int, deque[float]] = field(default_factory=dict)
+    # Internal counters surfaced via /api/metrics. Lives on AppState so it
+    # shares a lifetime with the rest of the daemon — reset on every restart.
+    metrics: Metrics = field(default_factory=Metrics)
 
     async def broadcast(self, event: dict) -> None:
+        self.metrics.broadcasts_total += 1
         for q in list(self.sse_queues):
             try:
                 q.put_nowait(event)
@@ -423,6 +452,9 @@ async def _scheduler_loop(s: AppState) -> None:
     """
     interval = _safe_float(s.config.get("process_scan_interval_seconds", 2), default=2.0)
     while True:
+        # Bracket the tick with time.monotonic() — independent of wall-clock
+        # so NTP jumps can't corrupt the duration_ms_max gauge.
+        tick_start = time.monotonic()
         try:
             new_sessions = await build_sessions(
                 s.config,
@@ -432,6 +464,7 @@ async def _scheduler_loop(s: AppState) -> None:
                 iterm_tty_map=s.iterm_tty_map,
             )
             await _emit_diffs(s, new_sessions)
+            s.metrics.process_scan_last_count = len(new_sessions)
 
             if s.fs_watcher:
                 cwds = {x.cwd for x in new_sessions if x.cwd}
@@ -440,6 +473,13 @@ async def _scheduler_loop(s: AppState) -> None:
             await _maybe_prune(s)
         except Exception as e:  # noqa: BLE001
             log.exception("scheduler iteration failed: %s", e)
+            s.metrics.detector_failures_total += 1
+        finally:
+            elapsed_ms = (time.monotonic() - tick_start) * 1000.0
+            s.metrics.scheduler_ticks_total += 1
+            s.metrics.scheduler_tick_duration_ms_sum += elapsed_ms
+            if elapsed_ms > s.metrics.scheduler_tick_duration_ms_max:
+                s.metrics.scheduler_tick_duration_ms_max = elapsed_ms
         await asyncio.sleep(interval)
 
 
@@ -455,10 +495,16 @@ async def _iterm_refresh_loop(s: AppState) -> None:
     """
     interval = _safe_float(s.config.get("iterm_refresh_interval_seconds", 5), default=5.0)
     while True:
+        tick_start = time.monotonic()
         try:
             await _iterm_refresh_once(s)
         except Exception as e:  # noqa: BLE001
             log.exception("iterm refresh iteration failed: %s", e)
+            s.metrics.iterm_refresh_failures_total += 1
+        finally:
+            elapsed_ms = (time.monotonic() - tick_start) * 1000.0
+            s.metrics.iterm_refresh_total += 1
+            s.metrics.iterm_refresh_duration_ms_sum += elapsed_ms
         await asyncio.sleep(interval)
 
 
@@ -539,6 +585,7 @@ def create_app() -> FastAPI:
     app.include_router(forecast.router)
     app.include_router(files.router)
     app.include_router(admin.router)
+    app.include_router(metrics.router)
 
     if FRONTEND_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")

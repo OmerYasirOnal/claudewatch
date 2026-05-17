@@ -14,6 +14,11 @@ async def stream(request: Request):
     s = request.app.state.s
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
     s.sse_queues.add(queue)
+    # Surface live subscriber count for /api/metrics. Kept on AppState.metrics
+    # if present so legacy AppState instances (e.g. older tests) don't blow up.
+    _metrics = getattr(s, "metrics", None)
+    if _metrics is not None:
+        _metrics.sse_subscribers += 1
 
     async def gen():
         try:
@@ -54,6 +59,8 @@ async def stream(request: Request):
                     yield ":keepalive\n\n"
         finally:
             s.sse_queues.discard(queue)
+            if _metrics is not None and _metrics.sse_subscribers > 0:
+                _metrics.sse_subscribers -= 1
 
     return StreamingResponse(
         gen(),
