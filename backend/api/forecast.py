@@ -57,12 +57,29 @@ async def forecast(
     request: Request,
     window_hours: int = Query(24, ge=1, le=720),
 ) -> ForecastResponse:
-    """Project spend over the next 24h / 7d / 30d using the trailing window."""
+    """Project spend over the next 24h / 7d / 30d using the trailing window.
+
+    Plan gating (#126): the per-token cost numbers in ``state.db`` only
+    correspond to a real bill when the user is on the metered ``api`` plan.
+    On any other plan (``pro``, ``max``, ``team``, ``free``, …) the dollar
+    figures would be unmoored from the user's actual billing model, so we
+    return a zeroed response (same shape, so the UI degrades gracefully).
+    The frontend already hides the forecast card in that case; this is
+    defense-in-depth for direct API consumers.
+    """
     s = _state(request)
+    # Default to "api" when no plan is configured (matches DEFAULT_CONFIG).
+    plan = (s.config or {}).get("plan", "api")
+    if plan != "api":
+        return _empty(window_hours)
     if s.state is None or s.state._conn is None:
         return _empty(window_hours)
 
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+    # SUM/COUNT aggregates always return exactly one row (NULL/0 on an empty
+    # input), so ``rows`` is guaranteed length 1. COALESCE(SUM(...), 0) guards
+    # against NULL when the table has no matching rows; no need for a fallback
+    # branch on ``not rows``.
     rows = await s.state._conn.execute_fetchall(
         """
         SELECT COALESCE(SUM(cost_estimate), 0) AS cost,
@@ -72,9 +89,6 @@ async def forecast(
         """,
         (cutoff,),
     )
-    if not rows:
-        return _empty(window_hours)
-
     row = dict(rows[0])
     observed_cost = float(row.get("cost") or 0.0)
     observed_count = int(row.get("n") or 0)
