@@ -2,52 +2,104 @@
 # Downloads python-build-standalone, a portable, redistributable Python build.
 # https://github.com/astral-sh/python-build-standalone
 #
-# Output: mac/build/python/ — a self-contained Python install we can copy into
-# the .app bundle and ship to users with no system-Python dependency.
+# Output (default — host arch only):
+#   mac/build/python/                  → single tree for this machine's arch
+#
+# Output (UNIVERSAL=1):
+#   mac/build/python-arm64/            → aarch64-apple-darwin tree
+#   mac/build/python-x86_64/           → x86_64-apple-darwin  tree
+#   mac/build/python/                  → symlink/copy of the host-arch tree so
+#                                        local `swift run` (dev mode) still works
+#
+# We deliberately do NOT lipo-merge the full python-build-standalone
+# distribution — it ships hundreds of .so extension modules and the merge is
+# fragile across releases. Instead PythonRunner.swift picks the right tree at
+# runtime based on the host arch. See mac/README.md → "Universal builds".
 
 set -euo pipefail
 
 PY_VERSION="${PY_VERSION:-3.12.7}"
 PBS_RELEASE="${PBS_RELEASE:-20241016}"   # python-build-standalone release tag
-
-ARCH="$(uname -m)"
-case "$ARCH" in
-    arm64)  PBS_ARCH="aarch64-apple-darwin" ;;
-    x86_64) PBS_ARCH="x86_64-apple-darwin" ;;
-    *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
-esac
-
-# `install_only` variant: minimal stdlib + interpreter, no test suite.
-TARBALL_NAME="cpython-${PY_VERSION}+${PBS_RELEASE}-${PBS_ARCH}-install_only.tar.gz"
-URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${TARBALL_NAME}"
+UNIVERSAL="${UNIVERSAL:-0}"
 
 BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/build"
-PYTHON_DIR="${BUILD_DIR}/python"
 CACHE_DIR="${BUILD_DIR}/.cache"
-TARBALL_PATH="${CACHE_DIR}/${TARBALL_NAME}"
-
 mkdir -p "${CACHE_DIR}"
 
-if [ -x "${PYTHON_DIR}/bin/python3" ]; then
-    echo "✓ Python ${PY_VERSION} already present at ${PYTHON_DIR}"
-    "${PYTHON_DIR}/bin/python3" --version
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    arm64|aarch64) HOST_PBS_ARCH="aarch64-apple-darwin"; HOST_SUFFIX="arm64" ;;
+    x86_64)        HOST_PBS_ARCH="x86_64-apple-darwin";  HOST_SUFFIX="x86_64" ;;
+    *) echo "Unsupported arch: $HOST_ARCH" >&2; exit 1 ;;
+esac
+
+# fetch_arch <pbs-arch> <dest-dir>
+# Downloads (with cache) and extracts a single arch into dest-dir.
+fetch_arch() {
+    local pbs_arch="$1"
+    local dest="$2"
+    local tarball="cpython-${PY_VERSION}+${PBS_RELEASE}-${pbs_arch}-install_only.tar.gz"
+    local url="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${tarball}"
+    local tarball_path="${CACHE_DIR}/${tarball}"
+
+    if [ -x "${dest}/bin/python3" ]; then
+        echo "✓ Python ${PY_VERSION} (${pbs_arch}) already present at ${dest}"
+        return 0
+    fi
+
+    if [ ! -f "${tarball_path}" ]; then
+        echo "→ Downloading ${tarball} (~22 MB)..."
+        curl -L --fail --progress-bar -o "${tarball_path}" "${url}"
+    else
+        echo "✓ Cached tarball: ${tarball_path}"
+    fi
+
+    echo "→ Extracting ${pbs_arch} into ${dest}..."
+    rm -rf "${dest}"
+    local parent
+    parent="$(dirname "${dest}")"
+    mkdir -p "${parent}"
+    # The tarball expands into a top-level `python/` dir. Extract into a
+    # scratch dir then rename so we land at exactly ${dest}.
+    local scratch
+    scratch="$(mktemp -d "${BUILD_DIR}/.extract.XXXXXX")"
+    tar -xzf "${tarball_path}" -C "${scratch}"
+    mv "${scratch}/python" "${dest}"
+    rmdir "${scratch}"
+    echo "✓ Extracted ${pbs_arch} → ${dest}"
+}
+
+if [ "${UNIVERSAL}" = "1" ]; then
+    echo "→ UNIVERSAL=1: fetching arm64 + x86_64 python-build-standalone"
+    fetch_arch "aarch64-apple-darwin" "${BUILD_DIR}/python-arm64"
+    fetch_arch "x86_64-apple-darwin"  "${BUILD_DIR}/python-x86_64"
+
+    # For dev-mode `swift run` we still want a `mac/build/python/` pointing at
+    # the host-arch tree so the existing PythonRunner fallback resolves.
+    # We use a symlink (cheap, no extra disk) — on macOS it's a portable choice.
+    rm -rf "${BUILD_DIR}/python"
+    ln -s "python-${HOST_SUFFIX}" "${BUILD_DIR}/python"
+    echo "✓ Universal trees ready:"
+    echo "  arm64:   ${BUILD_DIR}/python-arm64"
+    echo "  x86_64:  ${BUILD_DIR}/python-x86_64"
+    echo "  symlink: ${BUILD_DIR}/python → python-${HOST_SUFFIX} (dev-mode shim)"
+    "${BUILD_DIR}/python-arm64/bin/python3" --version 2>/dev/null \
+        || echo "  (arm64 python3 not runnable on this host — expected on x86_64)"
+    "${BUILD_DIR}/python-x86_64/bin/python3" --version 2>/dev/null \
+        || echo "  (x86_64 python3 not runnable on this host — expected on arm64)"
+    echo "  Sizes:"
+    du -sh "${BUILD_DIR}/python-arm64"  | awk '{print "    arm64:  " $1}'
+    du -sh "${BUILD_DIR}/python-x86_64" | awk '{print "    x86_64: " $1}'
     exit 0
 fi
 
-if [ ! -f "${TARBALL_PATH}" ]; then
-    echo "→ Downloading ${TARBALL_NAME} (~22 MB)..."
-    curl -L --fail --progress-bar -o "${TARBALL_PATH}" "${URL}"
-else
-    echo "✓ Cached tarball: ${TARBALL_PATH}"
+# Single-arch (default) path — preserves the historical behavior so
+# `make app` keeps working unchanged on arm64-only checkouts.
+PYTHON_DIR="${BUILD_DIR}/python"
+if [ -L "${PYTHON_DIR}" ]; then
+    # Replace a UNIVERSAL=1 symlink left over from a prior build with a real tree.
+    rm -f "${PYTHON_DIR}"
 fi
-
-echo "→ Extracting into ${PYTHON_DIR}..."
-rm -rf "${PYTHON_DIR}"
-mkdir -p "${PYTHON_DIR}"
-# The tarball extracts a top-level "python/" dir — strip it.
-tar -xzf "${TARBALL_PATH}" -C "${BUILD_DIR}" --strip-components=0
-# After extraction we have BUILD_DIR/python/ already. Done.
-
-echo "✓ Python bundled at ${PYTHON_DIR}"
+fetch_arch "${HOST_PBS_ARCH}" "${PYTHON_DIR}"
 "${PYTHON_DIR}/bin/python3" --version
 echo "  Size: $(du -sh "${PYTHON_DIR}" | awk '{print $1}')"

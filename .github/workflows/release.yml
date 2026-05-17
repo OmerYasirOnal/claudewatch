@@ -32,9 +32,12 @@ jobs:
       - name: Install root package + deps (for bundled python install)
         run: pip install -e .
 
-      - name: Build .app
+      - name: Build .app (universal — arm64 + x86_64)
         working-directory: mac
-        run: make app
+        # UNIVERSAL=1 ships both python-arm64 and python-x86_64 trees so the
+        # released DMG runs natively on Apple Silicon AND Intel Macs.
+        # See mac/README.md → "Universal builds" for the ~45 MB size impact.
+        run: make UNIVERSAL=1 app
 
       - name: Build .dmg
         working-directory: mac
@@ -56,6 +59,7 @@ jobs:
             ## ClaudeWatch v${{ steps.ver.outputs.version }}
 
             Native menu bar app + Python backend, bundled into a single drag-to-Applications .app.
+            Universal binary — runs natively on both Apple Silicon and Intel Macs.
 
             **Install**: download `ClaudeWatch.dmg`, mount, drag to `/Applications`, double-click.
             Verify checksum: `shasum -a 256 ClaudeWatch.dmg | diff - ClaudeWatch.dmg.sha256`
