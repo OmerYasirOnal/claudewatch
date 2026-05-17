@@ -1,13 +1,49 @@
 <!doctype html>
+<!--
+  The `dark` / `light` class on <html> is set by the inline bootstrap
+  script in <head> (runs synchronously before paint), and is kept in
+  sync at runtime by app.js's _applyTheme(). Keeping `dark` here as the
+  static fallback so the page renders correctly even if JS is disabled.
+-->
 <html lang="en" class="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ClaudeWatch</title>
+  <!--
+    Initial-paint theme bootstrap. Runs BEFORE Tailwind/Alpine so the
+    `dark` class is set on <html> immediately and we don't flash the wrong
+    theme. Mirrors _applyTheme() in app.js. Reads the same localStorage
+    key (claudewatch.theme); defaults to "auto" (follows OS).
+  -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("claudewatch.theme") || "auto";
+        if (t !== "light" && t !== "dark" && t !== "auto") t = "auto";
+        var wantDark = t === "dark"
+          || (t === "auto" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        var html = document.documentElement;
+        if (wantDark) { html.classList.add("dark"); html.classList.remove("light"); }
+        else { html.classList.add("light"); html.classList.remove("dark"); }
+      } catch (e) { /* keep default */ }
+    })();
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    /* Tailwind CDN inline config — switch dark-mode from "media" (OS only)
+       to "class" so the dark: variant follows our toggle. */
+    if (typeof tailwind !== "undefined") {
+      tailwind.config = { darkMode: "class" };
+    }
+  </script>
   <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <link rel="stylesheet" href="/static/styles.css" />
   <style>
+    /* Smooth color transitions when toggling light/dark. Keep short so
+       the dashboard feels responsive. */
+    html, body { transition: background-color 150ms ease, color 150ms ease; }
+
     /* Light theme overrides — applied when <html class="light"> */
     html.light, html.light body { background: #fafafa !important; color: #18181b !important; }
     html.light .bg-zinc-950, html.light .bg-zinc-950\/70 { background-color: #ffffff !important; }
@@ -38,7 +74,7 @@
     .cw-selected { outline: 2px solid rgb(16 185 129 / 0.75); outline-offset: -2px; }
   </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen dark" x-data="appRoot()" x-init="init()">
+<body class="bg-zinc-950 text-zinc-100 dark:bg-zinc-950 dark:text-zinc-100 min-h-screen" x-data="appRoot()" x-init="init()">
 
   <!-- Top bar -->
   <header class="border-b border-zinc-800 bg-zinc-950/70 backdrop-blur sticky top-0 z-20">
@@ -73,6 +109,21 @@
                   class="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white text-xs">×</button>
         </template>
       </div>
+      <!-- Theme toggle: cycles light → dark → auto. -->
+      <button @click="cycleTheme()"
+              :title="themeTooltip()"
+              :aria-label="themeTooltip()"
+              data-testid="theme-toggle"
+              class="p-1.5 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800 dark:hover:bg-zinc-800 transition-colors"
+      >
+        <!-- Sun (light) -->
+        <svg x-show="theme==='light'" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <!-- Moon (dark) -->
+        <svg x-show="theme==='dark'" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <!-- Half-sun-half-moon (auto) -->
+        <svg x-show="theme==='auto'" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" fill="currentColor"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>
+      </button>
+
       <button @click="showNewModal=true" class="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium">+ New session</button>
     </div>
   </header>
@@ -1092,8 +1143,9 @@
         <p class="text-sm text-zinc-400 mb-1">Saved in this browser.</p>
         <p class="text-xs text-zinc-500 italic mb-3">These display preferences are saved in your browser, not the backend.</p>
         <div class="flex items-center gap-3 text-sm">
-          <label class="flex items-center gap-2"><input type="radio" value="dark" x-model="appearance" @change="saveAppearance()"> Dark</label>
-          <label class="flex items-center gap-2"><input type="radio" value="light" x-model="appearance" @change="saveAppearance()"> Light</label>
+          <label class="flex items-center gap-2"><input type="radio" value="light" x-model="theme" @change="setTheme(theme)"> Light</label>
+          <label class="flex items-center gap-2"><input type="radio" value="dark" x-model="theme" @change="setTheme(theme)"> Dark</label>
+          <label class="flex items-center gap-2"><input type="radio" value="auto" x-model="theme" @change="setTheme(theme)"> Auto (follow OS)</label>
         </div>
       </section>
 
