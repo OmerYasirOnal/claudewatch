@@ -496,9 +496,7 @@ async def test_maybe_check_budgets_does_not_advance_clock_when_non_api_plan(monk
     assert mock_notify.await_count == 0
 
 
-async def test_maybe_check_budgets_does_not_advance_clock_when_notifications_muted(
-    monkeypatch, state
-):
+async def test_maybe_check_budgets_does_not_advance_clock_when_notifications_muted(monkeypatch, state):
     """Globally muted notifications must short-circuit BEFORE the clock update."""
     mock_notify = AsyncMock()
     monkeypatch.setattr("backend.server.notify", mock_notify)
@@ -567,9 +565,7 @@ async def test_budgets_endpoint_uses_gather_for_concurrency(api_app, monkeypatch
     # 3 windows × non-zero spend → all 3 should report the mocked spend.
     spend_values = sorted(w["spent_usd"] for w in data["windows"])
     assert spend_values == sorted([1.0 + 24, 1.0 + 168, 1.0 + 720])
-    assert max_in_flight >= 2, (
-        f"expected concurrent cost_in_window calls, max_in_flight={max_in_flight}"
-    )
+    assert max_in_flight >= 2, f"expected concurrent cost_in_window calls, max_in_flight={max_in_flight}"
 
 
 async def test_budgets_endpoint_payload_unchanged_after_gather(api_app):
@@ -609,3 +605,40 @@ async def test_cost_in_window_empty_db_returns_zero_via_coalesce(state):
     assert dict(rows[0])["n"] == 0
     assert await state.cost_in_window(24) == 0.0
     assert await state.cost_in_window(720) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# #149: /api/budgets must survive a per-window DB error by zeroing out the
+# failing window only — the other windows must still render normally.
+# ---------------------------------------------------------------------------
+
+
+async def test_budgets_endpoint_isolates_per_window_db_error(api_app, monkeypatch):
+    """A failing window must NOT 500 the endpoint — it should zero out and
+    the other windows must still return."""
+    client, app, st = api_app
+
+    real_cost = app.state.s.state.cost_in_window
+
+    async def flaky_cost_in_window(hours):
+        if hours == 168:
+            raise RuntimeError("simulated DB error on weekly window")
+        return await real_cost(hours)
+
+    app.state.s.state.cost_in_window = flaky_cost_in_window
+
+    now = datetime.now(timezone.utc)
+    await _insert_ended(
+        st, pid=1, started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), cost=2.50
+    )
+
+    r = client.get("/api/budgets")
+    assert r.status_code == 200, f"endpoint should not 500 on a per-window failure; got {r.status_code}"
+    data = r.json()
+    by_name = {w["window"]: w for w in data["windows"]}
+    # Failed window zeroed out.
+    assert by_name["weekly"]["spent_usd"] == 0.0
+    assert by_name["weekly"]["percent"] == 0.0
+    # Other windows still computed normally.
+    assert by_name["daily"]["spent_usd"] == pytest.approx(2.50)
+    assert by_name["monthly"]["spent_usd"] == pytest.approx(2.50)
