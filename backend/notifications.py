@@ -22,8 +22,14 @@ def _safe_as(s: str) -> str:
     escape character — so anything that might be attacker-controlled (cwd
     paths, PIDs rendered from session data, etc.) must have backslashes and
     quotes escaped before being interpolated into a script.
+
+    #95: also strip control characters (codepoint < 0x20, including newlines).
+    A raw \\n in the input would terminate the AppleScript string literal early
+    and either break the script outright or silently drop the notification —
+    which is what we used to do whenever a cwd or model name contained one.
     """
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+    s = s.replace("\\", "\\\\").replace('"', '\\"')
+    return "".join(ch if (ord(ch) >= 0x20 or ch == " ") else " " for ch in s)
 
 
 async def notify(
