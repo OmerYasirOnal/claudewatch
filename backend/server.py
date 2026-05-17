@@ -33,7 +33,18 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from backend.api import actions, admin, config_api, files, health, history, insights, sessions, stream
+from backend.api import (
+    actions,
+    admin,
+    config_api,
+    files,
+    forecast,
+    health,
+    history,
+    insights,
+    sessions,
+    stream,
+)
 from backend.config import STATE_DB, load_config
 from backend.detectors.filesystem_watch import FilesystemWatcher
 from backend.detectors.iterm_applescript import (
@@ -525,6 +536,7 @@ def create_app() -> FastAPI:
     app.include_router(history.router)
     app.include_router(config_api.router)
     app.include_router(insights.router)
+    app.include_router(forecast.router)
     app.include_router(files.router)
     app.include_router(admin.router)
 
