@@ -493,13 +493,13 @@ async def _maybe_check_budgets(s: AppState) -> None:
     require an actual timezone (we store UTC) or arbitrary "next 24h"
     semantics that surprise users. Restart the daemon to clear the gates.
     """
+    # #145: cheap gate-only short-circuits run FIRST so the rate-limit clock
+    # is only consumed when we're actually going to do work. Previously the
+    # clock advanced on every tick even when budgets were disabled, meaning a
+    # user who enabled budgets right after a tick had to wait up to 60s for
+    # the first evaluation.
     if s.state is None or s.state._conn is None:
         return
-    now = time.monotonic()
-    if (now - s.last_budget_check_at) < _BUDGET_CHECK_INTERVAL_SECONDS:
-        return
-    s.last_budget_check_at = now
-
     cfg = (s.config or {}).get("budgets", {}) or {}
     if not bool(cfg.get("enabled")):
         return
@@ -514,6 +514,11 @@ async def _maybe_check_budgets(s: AppState) -> None:
         # Honor the global notifications switch — budget alerts are still
         # notifications and shouldn't fire when the user has muted all of them.
         return
+
+    now = time.monotonic()
+    if (now - s.last_budget_check_at) < _BUDGET_CHECK_INTERVAL_SECONDS:
+        return
+    s.last_budget_check_at = now
 
     try:
         warn_at = float(cfg.get("warn_at_percent", 80))

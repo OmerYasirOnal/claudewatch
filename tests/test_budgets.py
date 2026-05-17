@@ -453,3 +453,73 @@ async def test_budgets_endpoint_plan_case_insensitive(api_app, plan_value):
     daily = next(w for w in data["windows"] if w["window"] == "daily")
     assert daily["spent_usd"] == pytest.approx(2.50)
     assert daily["percent"] == pytest.approx(50.0)
+
+
+# ---------------------------------------------------------------------------
+# #145: _maybe_check_budgets must not advance the rate-limit clock when the
+# gates (budgets disabled, non-api plan, notifications muted, no DB) fire.
+# Otherwise the user who just enabled budgets has to wait up to 60s for the
+# next evaluation.
+# ---------------------------------------------------------------------------
+
+
+async def test_maybe_check_budgets_does_not_advance_clock_when_disabled(monkeypatch, state):
+    """Two quick calls with budgets disabled must NOT update last_budget_check_at."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+    cfg = _budgets_cfg()
+    cfg["budgets"]["enabled"] = False
+    s = AppState(config=cfg, state=state)
+    s.last_budget_check_at = -1_000_000.0
+    sentinel = s.last_budget_check_at
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at == sentinel, "clock advanced even though budgets are disabled"
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at == sentinel, "clock advanced on 2nd call with budgets disabled"
+    assert mock_notify.await_count == 0
+
+
+async def test_maybe_check_budgets_does_not_advance_clock_when_non_api_plan(monkeypatch, state):
+    """Non-api plan must short-circuit BEFORE the rate-limit clock update."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+    cfg = _budgets_cfg()
+    cfg["plan"] = "max"
+    s = AppState(config=cfg, state=state)
+    s.last_budget_check_at = -1_000_000.0
+    sentinel = s.last_budget_check_at
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at == sentinel
+    assert mock_notify.await_count == 0
+
+
+async def test_maybe_check_budgets_does_not_advance_clock_when_notifications_muted(
+    monkeypatch, state
+):
+    """Globally muted notifications must short-circuit BEFORE the clock update."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+    cfg = _budgets_cfg()
+    cfg["notifications"]["enabled"] = False
+    s = AppState(config=cfg, state=state)
+    s.last_budget_check_at = -1_000_000.0
+    sentinel = s.last_budget_check_at
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at == sentinel
+    assert mock_notify.await_count == 0
+
+
+async def test_maybe_check_budgets_advances_clock_when_work_runs(monkeypatch, state):
+    """Sanity-check: when all gates pass, the clock IS advanced (cooldown active)."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+    s = AppState(config=_budgets_cfg(), state=state)
+    s.last_budget_check_at = -1_000_000.0
+    sentinel = s.last_budget_check_at
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at != sentinel, "clock should advance when gates pass"
