@@ -79,7 +79,10 @@ async def budgets(request: Request) -> BudgetsResponse:
     """Return current spend vs. configured cap for each budget window."""
     s = _state(request)
     cfg = (s.config or {}).get("budgets", {}) or {}
-    plan = (s.config or {}).get("plan", "api")
+    # #143: lowercase on read so hand-edited config.toml entries like
+    # ``plan = "API"`` (which bypass the Pydantic Literal validator) don't
+    # silently zero out cost data.
+    plan = str((s.config or {}).get("plan", "api") or "api").strip().lower()
     if plan != "api" or s.state is None or s.state._conn is None:
         return _empty_response(cfg)
 

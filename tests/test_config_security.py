@@ -119,3 +119,56 @@ def test_save_config_path_is_pathlib(tmp_home):
     """Defensive: confirm CONFIG_PATH stays a Path after save."""
     tmp_home.save_config({"port": 7788})
     assert isinstance(tmp_home.CONFIG_PATH, Path)
+
+
+# ---------------------------------------------------------------------------
+# #143: plan field must be lowercased on load + save so hand-edited
+# ``config.toml`` entries like ``plan = "API"`` don't silently zero out
+# cost data downstream (forecast/budgets/insights all compare to "api").
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("API", "api"),
+        ("Api", "api"),
+        ("ApI", "api"),
+        ("  api  ", "api"),
+        ("api", "api"),
+        ("MAX", "max"),
+        ("Pro", "pro"),
+        ("", "api"),  # empty string falls back to default
+    ],
+)
+def test_load_config_normalizes_plan_case(tmp_home, raw, expected):
+    """tomllib parses ``plan`` raw — load_config must lowercase + strip it."""
+    tmp_home.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_home.CONFIG_PATH.write_text(f'plan = "{raw}"\n', encoding="utf-8")
+    cfg = tmp_home.load_config()
+    assert cfg["plan"] == expected
+
+
+def test_save_config_normalizes_plan_case(tmp_home):
+    """Programmatic save_config('API') must persist as 'api' on disk."""
+    tmp_home.save_config({"plan": "API"})
+    reloaded = tmp_home.load_config()
+    assert reloaded["plan"] == "api"
+
+
+def test_update_config_normalizes_plan_case(tmp_home):
+    """update_config must normalize the plan field before persisting."""
+    tmp_home.save_config({"plan": "api"})
+    merged = tmp_home.update_config({"plan": "Max"})
+    assert merged["plan"] == "max"
+    reloaded = tmp_home.load_config()
+    assert reloaded["plan"] == "max"
+
+
+def test_load_config_handles_non_string_plan_field(tmp_home):
+    """A bogus non-string ``plan`` value must fall back to the default 'api'
+    rather than crash downstream comparisons."""
+    tmp_home.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_home.CONFIG_PATH.write_text("plan = 42\n", encoding="utf-8")
+    cfg = tmp_home.load_config()
+    assert cfg["plan"] == "api"

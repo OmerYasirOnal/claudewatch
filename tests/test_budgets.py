@@ -431,3 +431,25 @@ async def test_budgets_endpoint_zeroes_out_on_non_api_plan(api_app):
     for w in data["windows"]:
         assert w["spent_usd"] == 0.0
         assert w["percent"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# #143: plan gate must be case-insensitive in /api/budgets too.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("plan_value", ["API", "Api", "ApI", "  api  "])
+async def test_budgets_endpoint_plan_case_insensitive(api_app, plan_value):
+    """Mixed-case ``plan`` values must be treated as 'api' (real cost shown)."""
+    client, app, st = api_app
+    app.state.s.config["plan"] = plan_value
+    now = datetime.now(timezone.utc)
+    await _insert_ended(
+        st, pid=1, started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), cost=2.50
+    )
+    r = client.get("/api/budgets")
+    assert r.status_code == 200
+    data = r.json()
+    daily = next(w for w in data["windows"] if w["window"] == "daily")
+    assert daily["spent_usd"] == pytest.approx(2.50)
+    assert daily["percent"] == pytest.approx(50.0)

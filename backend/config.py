@@ -125,6 +125,23 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def _normalize_plan(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Coerce ``plan`` to a lowercased, stripped string.
+
+    #143: ``tomllib`` parses ``config.toml`` directly into the runtime config
+    with no Pydantic validation. If the user writes ``plan = "API"`` or
+    ``plan = "Api"`` by hand, the case-sensitive ``plan != "api"`` checks
+    in forecast.py / budgets.py / insights.py / server.py silently zero out
+    all cost data. Normalizing once here means every call site can keep its
+    cheap ``!= "api"`` comparison.
+    """
+    raw = cfg.get("plan", "api")
+    if not isinstance(raw, str):
+        raw = "api"
+    cfg["plan"] = raw.strip().lower() or "api"
+    return cfg
+
+
 def ensure_config_dir() -> None:
     # #40: ~/.claudewatch contains session metadata, conversation log paths,
     # and (via state.db, also written here) cost/usage history. We chmod the
@@ -141,10 +158,10 @@ def load_config() -> dict[str, Any]:
     ensure_config_dir()
     if not CONFIG_PATH.exists():
         save_config(DEFAULT_CONFIG)
-        return dict(DEFAULT_CONFIG)
+        return _normalize_plan(dict(DEFAULT_CONFIG))
     with open(CONFIG_PATH, "rb") as f:
         data = tomllib.load(f)
-    return _deep_merge(DEFAULT_CONFIG, data)
+    return _normalize_plan(_deep_merge(DEFAULT_CONFIG, data))
 
 
 def save_config(cfg: dict[str, Any]) -> None:
@@ -152,7 +169,7 @@ def save_config(cfg: dict[str, Any]) -> None:
     # truncated config.toml that breaks startup, so we dump to <path>.tmp first
     # and then os.replace into place (atomic on POSIX within the same dir).
     ensure_config_dir()
-    merged = _deep_merge(DEFAULT_CONFIG, cfg)
+    merged = _normalize_plan(_deep_merge(DEFAULT_CONFIG, cfg))
     tmp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
     try:
         with open(tmp_path, "wb") as f:
@@ -172,6 +189,6 @@ def save_config(cfg: dict[str, Any]) -> None:
 
 def update_config(updates: dict[str, Any]) -> dict[str, Any]:
     current = load_config()
-    merged = _deep_merge(current, updates)
+    merged = _normalize_plan(_deep_merge(current, updates))
     save_config(merged)
     return merged

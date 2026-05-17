@@ -503,7 +503,10 @@ async def _maybe_check_budgets(s: AppState) -> None:
     cfg = (s.config or {}).get("budgets", {}) or {}
     if not bool(cfg.get("enabled")):
         return
-    plan = (s.config or {}).get("plan", "api")
+    # #143: lowercase on read so hand-edited config.toml entries like
+    # ``plan = "API"`` (which bypass the Pydantic Literal validator) don't
+    # silently skip budget evaluation.
+    plan = str((s.config or {}).get("plan", "api") or "api").strip().lower()
     if plan != "api":
         return
     notif_cfg = (s.config or {}).get("notifications", {}) or {}

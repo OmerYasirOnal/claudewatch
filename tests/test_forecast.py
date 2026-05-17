@@ -395,3 +395,25 @@ async def test_forecast_no_plan_defaults_to_api(tmp_path):
     finally:
         client.__exit__(None, None, None)
         await state.close()
+
+
+# ---------------------------------------------------------------------------
+# #143: plan gate must be case-insensitive. A hand-edited ``config.toml``
+# with ``plan = "API"`` (or "Api") bypasses the Pydantic Literal validator
+# and used to silently zero out the forecast. The endpoint should normalize.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("plan_value", ["API", "Api", "ApI", "  api  ", "API "])
+async def test_forecast_plan_case_insensitive_returns_real_cost(tmp_path, plan_value):
+    """Mixed-case ``plan`` values must be treated as 'api' (real cost shown)."""
+    client, state = await _seeded_app(tmp_path, plan=plan_value)
+    try:
+        r = client.get("/api/forecast?window_hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["observed_cost_usd"] == pytest.approx(5.0)
+        assert data["observed_session_count"] == 1
+    finally:
+        client.__exit__(None, None, None)
+        await state.close()

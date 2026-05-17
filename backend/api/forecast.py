@@ -76,7 +76,11 @@ async def forecast(
     """
     s = _state(request)
     # Default to "api" when no plan is configured (matches DEFAULT_CONFIG).
-    plan = (s.config or {}).get("plan", "api")
+    # #143: lowercase on read so hand-edited config.toml entries like
+    # ``plan = "API"`` (which bypass the Pydantic Literal validator) don't
+    # silently zero out cost data. load_config also normalizes — this is
+    # defense-in-depth for callers that construct configs in-memory.
+    plan = str((s.config or {}).get("plan", "api") or "api").strip().lower()
     if plan != "api":
         return _empty(window_hours)
     if s.state is None or s.state._conn is None:
