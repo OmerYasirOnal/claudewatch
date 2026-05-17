@@ -73,6 +73,30 @@ async def get_files(pid: int, request: Request, minutes: int = 10):
     return [c.model_dump(mode="json") for c in changes]
 
 
+@router.get("/sessions/{pid}/timeline")
+async def get_timeline(pid: int, request: Request) -> dict[str, Any]:
+    """Return a chronologically-ordered list of significant events.
+
+    Empty session (no log on disk) returns an empty event list rather than a
+    404 so the frontend can render an "No events yet" placeholder. We DO
+    return 404 if the pid itself is not a known session.
+    """
+    from backend.detectors.timeline import derive_timeline
+
+    s = _state(request)
+    sess = s.sessions.get(pid)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if not sess.conversation_log_path:
+        # Known session but no log yet — empty timeline.
+        from backend.models import Timeline
+
+        return Timeline(pid=pid, events=[], truncated=False).model_dump(mode="json")
+    log_path = Path(sess.conversation_log_path)
+    timeline = await asyncio.to_thread(derive_timeline, log_path, pid)
+    return timeline.model_dump(mode="json")
+
+
 @router.get("/sessions/{pid}/log-tail")
 async def get_log_tail(
     pid: int,

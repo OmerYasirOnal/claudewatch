@@ -14,6 +14,12 @@ function appRoot() {
     filters: ["All", "iTerm", "Tmux", "Headless", "Working", "Idle", "High-cost", "Bookmarked"],
     detailPid: null,
     detail: null,
+
+    // F11 - per-session event timeline (forensic view)
+    selectedSessionTimeline: null,   // { pid, events: [...], truncated: bool } | null
+    timelineLoading: false,
+    timelineError: null,
+    timelinePid: null,               // pid we last attempted to load (so re-clicks re-fetch)
     showNewModal: false,
     newSession: { cwd: "", window_type: "new-window", skipPerm: true, customFlags: "" },
     newSessionError: "",
@@ -547,9 +553,105 @@ function appRoot() {
       let r;
       try {
         r = await fetch(`/api/sessions/${pid}`);
-        if (r.ok) { this.detail = await r.json(); return; }
+        if (r.ok) { this.detail = await r.json(); }
       } catch (e) { /* ignore */ }
-      this._setError(`Failed to load /api/sessions/${pid}: HTTP ${r?.status ?? '???'}`);
+      if (!r || !r.ok) {
+        this._setError(`Failed to load /api/sessions/${pid}: HTTP ${r?.status ?? '???'}`);
+      }
+      // Always also fetch the timeline so the detail panel can render it.
+      this.loadTimeline(pid);
+    },
+
+    /**
+     * Fetch the forensic event timeline for a session. Stores into
+     * ``selectedSessionTimeline``. Reloading replaces the prior value
+     * rather than appending. Network/HTTP errors degrade gracefully — we
+     * surface ``timelineError`` for the UI without clobbering existing
+     * data.
+     */
+    async loadTimeline(pid) {
+      if (pid == null) return;
+      this.timelinePid = pid;
+      this.timelineLoading = true;
+      this.timelineError = null;
+      let r;
+      try {
+        r = await fetch(`/api/sessions/${pid}/timeline`);
+      } catch (e) {
+        this.timelineLoading = false;
+        this.timelineError = "Network error loading timeline";
+        // Don't clobber previously-loaded data — degrade gracefully.
+        return;
+      }
+      if (!r || !r.ok) {
+        this.timelineLoading = false;
+        this.timelineError = `HTTP ${r?.status ?? "???"} loading timeline`;
+        return;
+      }
+      try {
+        const data = await r.json();
+        // Replace, don't append.
+        this.selectedSessionTimeline = {
+          pid: data.pid,
+          events: Array.isArray(data.events) ? data.events : [],
+          truncated: !!data.truncated,
+        };
+      } catch (e) {
+        this.timelineError = "Malformed timeline response";
+      } finally {
+        this.timelineLoading = false;
+      }
+    },
+
+    /**
+     * Reset timeline state — called when the detail panel is closed so the
+     * next open starts from a clean slate.
+     */
+    clearTimeline() {
+      this.selectedSessionTimeline = null;
+      this.timelineLoading = false;
+      this.timelineError = null;
+      this.timelinePid = null;
+    },
+
+    /**
+     * Map a timeline event type to a single-character glyph for the row's
+     * leading icon column. Kept as ASCII/emoji to avoid adding a fresh SVG
+     * dependency.
+     */
+    timelineIcon(type) {
+      switch (type) {
+        case "started":             return "▶";
+        case "ended":               return "■";
+        case "model_switch":        return "↻";
+        case "first_tool":          return "★";
+        case "tool_call":           return "⚙";
+        case "subagent_started":    return "→";
+        case "subagent_finished":   return "✓";
+        case "thinking_started":    return "✦";
+        case "permission_prompt":   return "!";
+        case "error":               return "✕";
+        default:                    return "·";
+      }
+    },
+
+    /**
+     * Color class for the icon column, keyed by event type. Returns Tailwind
+     * utility strings so the same helper works in both light and dark mode.
+     */
+    timelineIconClass(type) {
+      switch (type) {
+        case "error":               return "text-rose-400";
+        case "subagent_finished":   return "text-emerald-400";
+        case "subagent_started":    return "text-amber-400";
+        case "permission_prompt":   return "text-amber-400";
+        case "model_switch":        return "text-sky-400";
+        case "first_tool":          return "text-emerald-400";
+        case "ended":               return "text-zinc-400";
+        case "started":             return "text-emerald-400";
+        case "thinking_started":    return "text-fuchsia-400";
+        default:                    return "text-zinc-400";
+      }
     },
 
     // Cost forecast (Insights tab)
