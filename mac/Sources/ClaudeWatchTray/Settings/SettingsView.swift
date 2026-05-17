@@ -17,6 +17,8 @@ struct SettingsView: View {
                     .tabItem { Label("Editor", systemImage: "doc.text") }
                 RemoteControlTab(vm: vm)
                     .tabItem { Label("Remote Control", systemImage: "paperplane") }
+                UpdatesTab(vm: vm)
+                    .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
                 AboutTab()
                     .tabItem { Label("About", systemImage: "info.circle") }
             }
@@ -339,6 +341,104 @@ private struct RemoteControlTab: View {
         }
         .formStyle(.grouped)
         .padding(16)
+    }
+}
+
+// MARK: - Updates
+
+/// Sparkle preferences tab. Shows the master enable toggle, cadence picker,
+/// last-checked timestamp, and a manual "Check now" button. Backed by
+/// `UpdateManager.shared`, with persistence flowing through the standard
+/// draft → save pipeline alongside the rest of the Settings form.
+private struct UpdatesTab: View {
+    @ObservedObject var vm: SettingsViewModel
+    @ObservedObject private var updateMgr = UpdateManager.shared
+
+    /// Two-way bridge between `frequencyHours` (Double, persisted) and the
+    /// enum-backed Picker selection. Keeps the Picker honest while still
+    /// letting us store the raw hour value in `AppConfig`.
+    private var frequencySelection: Binding<UpdateManager.CheckFrequency> {
+        Binding(
+            get: { UpdateManager.CheckFrequency.from(hours: vm.draftConfig.updates.frequencyHours) },
+            set: { vm.draftConfig.updates.frequencyHours = $0.hours }
+        )
+    }
+
+    var body: some View {
+        Form {
+            Section("Automatic checks") {
+                Toggle("Automatically check for updates", isOn: $vm.draftConfig.updates.enabled)
+                Picker("Check frequency", selection: frequencySelection) {
+                    ForEach(UpdateManager.CheckFrequency.allCases) { freq in
+                        Text(freq.displayName).tag(freq)
+                    }
+                }
+                .pickerStyle(.menu)
+                // Disabling the picker when off makes the relationship between
+                // the two controls obvious — there's no point picking a
+                // cadence if checks are off entirely.
+                .disabled(!vm.draftConfig.updates.enabled)
+                Text("ClaudeWatch uses Sparkle to download signed updates from GitHub. The first check after enabling may take a minute while Sparkle validates the appcast signature.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Manual check") {
+                HStack {
+                    statusView
+                    Spacer()
+                    Button("Check now") {
+                        UpdateManager.shared.checkNow()
+                    }
+                    .disabled(updateMgr.status == .checking)
+                }
+                LabeledContent("Last checked") {
+                    Text(lastCheckedText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .padding(16)
+    }
+
+    /// Friendly rendering of the last-checked timestamp, falling back to
+    /// "Never" so the user can tell this is a fresh install.
+    private var lastCheckedText: String {
+        guard let ts = updateMgr.lastChecked else { return "Never" }
+        let fmt = DateFormatter()
+        fmt.dateStyle = .medium
+        fmt.timeStyle = .short
+        return fmt.string(from: ts)
+    }
+
+    /// Compact status indicator that mirrors `UpdateManager.Status`. Kept
+    /// inside the Settings sheet so the menu bar doesn't have to allocate
+    /// real estate to long error strings.
+    @ViewBuilder
+    private var statusView: some View {
+        switch updateMgr.status {
+        case .idle:
+            EmptyView()
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking…").font(.caption).foregroundStyle(.secondary)
+            }
+        case .foundUpdate(let version):
+            Label("Update available: v\(version)", systemImage: "arrow.down.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.tint)
+        case .upToDate:
+            Label("Up to date", systemImage: "checkmark.seal.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+        case .error(let msg):
+            Label(msg, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(2)
+        }
     }
 }
 

@@ -26,6 +26,20 @@ struct ClaudeWatchTrayApp: App {
         DispatchQueue.main.async {
             WelcomeController.shared.showIfFirstLaunch()
         }
+
+        // Sparkle bootstrap. Reads the user's persisted preferences and only
+        // starts background checks if they've opted in (default off — we
+        // don't ping a server until the user says so). The user can still
+        // trigger a manual check via the menu bar / Settings regardless.
+        // Deferred to the next run-loop tick for the same reason as the
+        // welcome flow: NSApp isn't fully alive yet during App.init.
+        DispatchQueue.main.async {
+            let prefs = SettingsViewModel.loadUpdatesFromDefaults()
+            UpdateManager.shared.start(
+                enabled: prefs.enabled,
+                frequencyHours: prefs.frequencyHours
+            )
+        }
     }
 
     var body: some Scene {

@@ -31,5 +31,25 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+
+    <!-- Sparkle auto-update keys.
+         SUFeedURL points at a GitHub Pages-served appcast.xml; the docs/ tree
+         in this repo is the source.
+         SUPublicEDKey is a placeholder — the real EdDSA public key must be
+         generated with `sparkle-cli generate-keys` and pasted here BEFORE the
+         first signed release. Until then automatic checks are inert because
+         Sparkle refuses to ingest unsigned items.
+         SUEnableAutomaticChecks defaults Sparkle on; we override at runtime
+         via UpdateManager so the user's opt-in preference wins.
+         SUScheduledCheckInterval is 604800s == 7 days, matching our default
+         "weekly" frequency. Runtime override via UpdateManager.start(...). -->
+    <key>SUFeedURL</key>
+    <string>https://omeryasironal.github.io/claudewatch/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>REPLACE_WITH_GENERATED_KEY</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>604800</integer>
 </dict>
 </plist>

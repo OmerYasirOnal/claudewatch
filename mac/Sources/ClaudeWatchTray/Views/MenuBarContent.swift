@@ -4,6 +4,7 @@ struct MenuBarContent: View {
     @ObservedObject var vm: AppViewModel
     @ObservedObject var runner: PythonRunner
     @ObservedObject private var notifMgr = NotificationManager.shared
+    @ObservedObject private var updateMgr = UpdateManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -236,10 +237,37 @@ struct MenuBarContent: View {
 
             Spacer()
 
+            checkForUpdatesButton
+
             pauseMenu
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    /// "Check for updates…" affordance. Disables while Sparkle is mid-check
+    /// and swaps in a tiny ProgressView so the user gets immediate feedback —
+    /// otherwise clicking the button feels like a no-op until Sparkle's own
+    /// alert finally surfaces a few seconds later.
+    @ViewBuilder
+    private var checkForUpdatesButton: some View {
+        Button {
+            UpdateManager.shared.checkNow()
+        } label: {
+            HStack(spacing: 4) {
+                if updateMgr.status == .checking {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.down.circle")
+                }
+                Text("Check for updates…")
+                    .font(.caption)
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .disabled(updateMgr.status == .checking)
+        .help("Check the appcast for a newer ClaudeWatch release")
     }
 
     /// Quick-action menu for pausing notifications. Always present so the user
