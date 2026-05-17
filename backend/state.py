@@ -264,6 +264,31 @@ class State:
             )
         return bins
 
+    async def cost_in_window(self, hours: int) -> float:
+        """Sum ``cost_estimate`` over ended sessions in the trailing ``hours``.
+
+        Returns a single scalar — the thin alternative to ``hourly_cost`` for
+        callers that just need the total (e.g. the budget checker in the
+        scheduler loop). Negative ``cost_estimate`` rows are clamped to 0 at
+        the SQL layer so a single bad row can't drive the total negative
+        (mirrors the forecast endpoint's defense, see #125).
+        """
+        await self.connect()
+        assert self._conn is not None
+        hours = min(max(int(hours), 1), 24 * 365 * 100)
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        rows = await self._conn.execute_fetchall(
+            """
+            SELECT COALESCE(SUM(CASE WHEN cost_estimate > 0 THEN cost_estimate ELSE 0 END), 0) AS cost
+            FROM sessions
+            WHERE ended_at IS NOT NULL AND ended_at >= ?
+            """,
+            (cutoff,),
+        )
+        if not rows:
+            return 0.0
+        return max(0.0, float(dict(rows[0]).get("cost") or 0.0))
+
     async def stats_today(self) -> dict:
         """Aggregate counts/sums over rows whose ``last_seen`` falls in the last 24h."""
         await self.connect()

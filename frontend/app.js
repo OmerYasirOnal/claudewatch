@@ -40,6 +40,9 @@ function appRoot() {
     hourlyCostData: null,
     hourlyCostError: null,
 
+    // Cost budgets (Insights tab — progress widget; Settings tab — config)
+    budgetsData: null,
+
     // F3 - Search
     searchQuery: "",
     _searchDebounce: null,
@@ -151,6 +154,7 @@ function appRoot() {
       // Prime the forecast card so it has data the first time the user opens Insights.
       this.loadForecast();
       this.loadHourlyCost(168);
+      this.loadBudgets();
       this.connectSSE();
       this._startNowTimer();
       this._installKeydown();
@@ -397,6 +401,11 @@ function appRoot() {
       this._setError(`Failed to load /api/config: HTTP ${r?.status ?? '???'}`);
     },
     _syncConfigDraft() {
+      // Normalize the source first so that the same keys/shape exist on both
+      // sides — otherwise the draft (post _normalizeConfigDraft) would
+      // diverge from config on shallow keys like `budgets` and the very
+      // first markConfigDirty() call would falsely report dirty.
+      this._normalizeConfig();
       this.configDraft = JSON.parse(JSON.stringify(this.config));
       this._normalizeConfigDraft();
       this.configDirty = false;
@@ -408,6 +417,16 @@ function appRoot() {
       if (!this.configDraft.editor) this.configDraft.editor = { enabled: false, command: "code" };
       if (typeof this.configDraft.editor.enabled !== "boolean") this.configDraft.editor.enabled = false;
       if (!this.configDraft.editor.command) this.configDraft.editor.command = "code";
+      // Budgets — never assume keys exist; the draft must be safe for
+      // x-model bindings even on a fresh install before /api/config has
+      // returned the [budgets] section.
+      if (!this.configDraft.budgets) this.configDraft.budgets = {};
+      const b = this.configDraft.budgets;
+      if (typeof b.enabled !== "boolean") b.enabled = false;
+      if (typeof b.daily_usd !== "number") b.daily_usd = Number(b.daily_usd) || 5.0;
+      if (typeof b.weekly_usd !== "number") b.weekly_usd = Number(b.weekly_usd) || 30.0;
+      if (typeof b.monthly_usd !== "number") b.monthly_usd = Number(b.monthly_usd) || 100.0;
+      if (typeof b.warn_at_percent !== "number") b.warn_at_percent = Number(b.warn_at_percent) || 80;
     },
     markConfigDirty() {
       this.configDirty = JSON.stringify(this.configDraft) !== JSON.stringify(this.config);
@@ -463,6 +482,15 @@ function appRoot() {
       if (!this.config.editor) this.config.editor = { enabled: false, command: "code" };
       if (typeof this.config.editor.enabled !== "boolean") this.config.editor.enabled = false;
       if (!this.config.editor.command) this.config.editor.command = "code";
+      // Keep budgets shape in sync with _normalizeConfigDraft so the dirty
+      // check (which deep-compares the two) doesn't trip on a fresh load.
+      if (!this.config.budgets) this.config.budgets = {};
+      const b = this.config.budgets;
+      if (typeof b.enabled !== "boolean") b.enabled = false;
+      if (typeof b.daily_usd !== "number") b.daily_usd = Number(b.daily_usd) || 5.0;
+      if (typeof b.weekly_usd !== "number") b.weekly_usd = Number(b.weekly_usd) || 30.0;
+      if (typeof b.monthly_usd !== "number") b.monthly_usd = Number(b.monthly_usd) || 100.0;
+      if (typeof b.warn_at_percent !== "number") b.warn_at_percent = Number(b.warn_at_percent) || 80;
     },
     showCost() {
       return (this.config?.plan ?? "api") === "api";
@@ -600,6 +628,40 @@ function appRoot() {
       return `Total: ${this.fmtMoney(total)} over ${hours} hours · ${sessLabel}`;
     },
 
+    // Cost budgets — single endpoint returns the three windows.
+    async loadBudgets() {
+      let r;
+      try {
+        r = await fetch("/api/budgets");
+        if (r && r.ok) {
+          const data = await r.json();
+          if (data && typeof data === "object") {
+            this.budgetsData = data;
+          }
+        }
+      } catch (e) {
+        // Silent — the widget renders a placeholder until the next poll.
+      }
+    },
+    showBudgetsCard() {
+      // Same plan + cardVisibility gate as the forecast card. Independently
+      // of `budgets.enabled`, we always render the widget when the plan is
+      // API so users can see their current spend against the (default) caps.
+      return this.showCost() && this.cardVisibility.cost !== false;
+    },
+    budgetBarColor(pct) {
+      // Tailwind classes — green <50%, yellow 50–80%, red >80%.
+      const p = Number(pct) || 0;
+      if (p > 80) return "bg-rose-500";
+      if (p >= 50) return "bg-amber-500";
+      return "bg-emerald-500";
+    },
+    budgetLabel(window) {
+      // Pretty display name for a window: "daily" → "Daily (24h)".
+      const map = { daily: "Daily (24h)", weekly: "Weekly (7d)", monthly: "Monthly (30d)" };
+      return map[window] || window;
+    },
+
     // F2 - Insights data
     async loadInsights() {
       try {
@@ -630,11 +692,13 @@ function appRoot() {
         this.loadInsights();
         this.loadForecast();
         this.loadHourlyCost(168);
+        this.loadBudgets();
         if (this._insightsTimer) clearInterval(this._insightsTimer);
         this._insightsTimer = setInterval(() => {
           this.loadInsights();
           this.loadForecast();
           this.loadHourlyCost(168);
+          this.loadBudgets();
         }, 30000);
       } else {
         if (this._insightsTimer) { clearInterval(this._insightsTimer); this._insightsTimer = null; }
