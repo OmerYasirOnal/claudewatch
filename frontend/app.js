@@ -69,8 +69,19 @@ function appRoot() {
     notesEditKey: null,
     notesEditText: "",
 
-    // F7 - appearance
+    // F7 - appearance / theme
+    // `theme` is the source of truth for the dark-mode toggle: one of
+    // "light" | "dark" | "auto". "auto" defers to the OS-level
+    // prefers-color-scheme via _themeMql below. Persisted in
+    // localStorage at key "claudewatch.theme".
+    //
+    // `appearance` is retained for backwards-compatibility with the
+    // previous 2-state implementation: any code or test that reads
+    // `appearance` will see "light" | "dark" mirroring the resolved
+    // theme (auto resolves to whatever the OS currently reports).
+    theme: "auto",
     appearance: "dark",
+    _themeMql: null,
 
     // F8 - density
     density: "comfortable",
@@ -119,7 +130,7 @@ function appRoot() {
 
     async init() {
       this._loadLocalPrefs();
-      this._applyAppearance();
+      this._initTheme();
       this._applyDensity();
       await Promise.all([this.loadHealth(), this.loadSessions(), this.loadStats(), this.loadConfig()]);
       // Prime the forecast card so it has data the first time the user opens Insights.
@@ -160,8 +171,19 @@ function appRoot() {
         }
       } catch (e) { /* ignore */ }
       try {
-        const app = localStorage.getItem("claudewatch.appearance");
-        if (app === "light" || app === "dark") this.appearance = app;
+        // Prefer the new "theme" key (light | dark | auto). Fall back to
+        // the legacy "appearance" key (light | dark) so users upgrading
+        // from the previous build keep their pick.
+        const t = localStorage.getItem("claudewatch.theme");
+        if (t === "light" || t === "dark" || t === "auto") {
+          this.theme = t;
+        } else {
+          const legacy = localStorage.getItem("claudewatch.appearance");
+          if (legacy === "light" || legacy === "dark") this.theme = legacy;
+        }
+        // Keep `appearance` aligned for back-compat consumers. "auto"
+        // resolves via _applyTheme below.
+        if (this.theme === "light" || this.theme === "dark") this.appearance = this.theme;
       } catch (e) { /* ignore */ }
       try {
         const den = localStorage.getItem("claudewatch.density");
@@ -204,26 +226,95 @@ function appRoot() {
       try { localStorage.setItem("claudewatch.expandedSubagents", JSON.stringify(this.expandedSubagents)); }
       catch (e) { /* ignore */ }
     },
+    /**
+     * Cycle through the three theme states: light → dark → auto → light.
+     * Triggered by the header toggle button.
+     */
+    cycleTheme() {
+      const next = this.theme === "light" ? "dark"
+                 : this.theme === "dark"  ? "auto"
+                 : "light";
+      this.setTheme(next);
+    },
+    /**
+     * Set the theme to one of "light" | "dark" | "auto". Unknown values
+     * fall back to "auto". Persists to localStorage and re-applies.
+     */
+    setTheme(theme) {
+      if (theme !== "light" && theme !== "dark" && theme !== "auto") {
+        theme = "auto";
+      }
+      this.theme = theme;
+      try { localStorage.setItem("claudewatch.theme", theme); } catch (e) { /* ignore */ }
+      // Mirror to legacy key so older code paths (and anyone inspecting
+      // the localStorage in DevTools) stay coherent.
+      try {
+        if (theme === "light" || theme === "dark") {
+          localStorage.setItem("claudewatch.appearance", theme);
+        }
+      } catch (e) { /* ignore */ }
+      this._applyTheme();
+    },
+    /**
+     * Backwards-compatible tooltip text for the theme toggle. The header
+     * UI shows the icon for the *current* state; the tooltip tells the
+     * user what clicking will do next.
+     */
+    themeTooltip() {
+      if (this.theme === "light") return "Theme: Light (click for Dark)";
+      if (this.theme === "dark")  return "Theme: Dark (click for Auto)";
+      return "Theme: Auto / system (click for Light)";
+    },
+    /**
+     * Apply the current `theme` to <html>. In "auto" mode, defer to the
+     * cached MediaQueryList (set by _initTheme). Also keeps the
+     * `appearance` field aligned with the resolved value for any code
+     * that still reads it.
+     */
+    _applyTheme() {
+      const wantDark = this.theme === "dark"
+        || (this.theme === "auto" && !!(this._themeMql && this._themeMql.matches));
+      const html = document.documentElement;
+      const body = document.body;
+      if (html && html.classList) {
+        html.classList.toggle("dark", wantDark);
+        html.classList.toggle("light", !wantDark);
+      }
+      if (body && body.classList) {
+        body.classList.toggle("dark", wantDark);
+        body.classList.toggle("light", !wantDark);
+      }
+      this.appearance = wantDark ? "dark" : "light";
+    },
+    /**
+     * Subscribe to OS-level prefers-color-scheme changes and do the
+     * first paint. Called once from init().
+     */
+    _initTheme() {
+      try {
+        if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+          this._themeMql = window.matchMedia("(prefers-color-scheme: dark)");
+          const onChange = () => this._applyTheme();
+          // Modern API; .addListener is the deprecated fallback.
+          if (typeof this._themeMql.addEventListener === "function") {
+            this._themeMql.addEventListener("change", onChange);
+          } else if (typeof this._themeMql.addListener === "function") {
+            this._themeMql.addListener(onChange);
+          }
+        }
+      } catch (e) { /* ignore */ }
+      this._applyTheme();
+    },
+    // Legacy shim: the previous build called saveAppearance() from a
+    // settings radio. Tests and any deep-link code may still call it.
+    // Forward to setTheme() so behavior stays consistent.
     saveAppearance() {
-      try { localStorage.setItem("claudewatch.appearance", this.appearance); }
-      catch (e) { /* ignore */ }
-      this._applyAppearance();
+      this.setTheme(this.appearance);
     },
     saveDensity() {
       try { localStorage.setItem("claudewatch.density", this.density); }
       catch (e) { /* ignore */ }
       this._applyDensity();
-    },
-    _applyAppearance() {
-      const html = document.documentElement;
-      const body = document.body;
-      if (this.appearance === "light") {
-        html.classList.add("light"); html.classList.remove("dark");
-        if (body) { body.classList.add("light"); body.classList.remove("dark"); }
-      } else {
-        html.classList.add("dark"); html.classList.remove("light");
-        if (body) { body.classList.add("dark"); body.classList.remove("light"); }
-      }
     },
     _applyDensity() {
       const html = document.documentElement;
