@@ -51,6 +51,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "on_high_cost": True,
         "cost_threshold_usd": 5.0,
     },
+    "budgets": {
+        # Opt-in: when False (the default), no budget notifications fire.
+        # Even when enabled, alerts are suppressed unless plan == "api"
+        # (same defense-in-depth gate the forecast endpoint uses), since
+        # dollar amounts on flat-rate plans don't correspond to a real bill.
+        "enabled": False,
+        "daily_usd": 5.00,
+        "weekly_usd": 30.00,
+        "monthly_usd": 100.00,
+        # Fire an "approaching" notification once per daemon-uptime when
+        # the rolling window spend crosses this percentage of the budget.
+        # Clamped to [50, 100] on the frontend; the backend treats values
+        # outside that range as no-op (no "approaching" tier fires).
+        "warn_at_percent": 80,
+    },
     "remote_control": {
         # Opt-in: when False (the default), POST /api/sessions/{pid}/send-text
         # returns 403. Flipping this gives the dashboard the ability to type

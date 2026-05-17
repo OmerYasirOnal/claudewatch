@@ -36,6 +36,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.api import (
     actions,
     admin,
+    budgets,
     config_api,
     files,
     forecast,
@@ -89,6 +90,21 @@ FRONTEND_DIR = Path(_env_frontend) if _env_frontend else Path(__file__).resolve(
 # How often state.prune() runs from inside the scheduler loop.
 _PRUNE_INTERVAL_SECONDS = 3600.0
 
+# How often _maybe_check_budgets() evaluates window spend. The scheduler tick
+# is 2s by default — that's far too noisy for budget evaluation, and the SQL
+# sums are O(rows-in-window). 60s is the smallest interval where a user would
+# perceive "real-time" notification and the SQL pressure is still negligible.
+_BUDGET_CHECK_INTERVAL_SECONDS = 60.0
+
+# Mapping of budget window name -> (config key for the dollar threshold, hours).
+# Keeping this here (rather than inline) makes _maybe_check_budgets a flat loop
+# and gives the tests one place to enumerate the supported windows.
+_BUDGET_WINDOWS: tuple[tuple[str, str, int], ...] = (
+    ("daily", "daily_usd", 24),
+    ("weekly", "weekly_usd", 168),
+    ("monthly", "monthly_usd", 720),
+)
+
 # Minimum gap between AppleScript fallback invocations. The AppleScript path
 # can momentarily front the iTerm window on Sonoma+, so we rate-limit hard.
 _APPLESCRIPT_MIN_INTERVAL_SECONDS = 30.0
@@ -140,6 +156,16 @@ class AppState:
     # PIDs we've already fired a "high cost" notification for, so we don't
     # spam every tick after the threshold has been crossed.
     notified_high_cost_pids: set[int] = field(default_factory=set)
+    # Budget-alert dedupe: each window name ("daily"/"weekly"/"monthly") goes
+    # in at most once per daemon uptime so a user gets one warning per window
+    # per restart. We deliberately do NOT reset at midnight — see
+    # _maybe_check_budgets for the rationale.
+    notified_budget_approaching: set[str] = field(default_factory=set)
+    notified_budget_exceeded: set[str] = field(default_factory=set)
+    # Last monotonic-clock timestamp of a budget evaluation. Used to rate-limit
+    # _maybe_check_budgets to at most once per _BUDGET_CHECK_INTERVAL_SECONDS;
+    # 0.0 means "never run, evaluate on the next tick".
+    last_budget_check_at: float = 0.0
     last_prune_at: float = 0.0
     # Set on lifespan shutdown so SSE generators (and any other long-lived
     # awaiters) can wake immediately instead of waiting for their next timeout.
@@ -427,6 +453,116 @@ async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
     s.sessions = new_map
 
 
+def _format_budget_notification(
+    window_name: str,
+    spent: float,
+    budget: float,
+    pct: float,
+    tier: str,
+) -> tuple[str, str, str]:
+    """Build (title, subtitle, message) for a budget alert.
+
+    ``tier`` is either "approaching" (warn-at threshold crossed) or
+    "exceeded" (100% threshold crossed). The title is capitalized to match
+    the macOS Notification Center style; subtitle carries the dollar
+    figures and message the percentage.
+    """
+    label = window_name.capitalize()
+    if tier == "exceeded":
+        title = f"⛔ {label} budget exceeded"
+    else:
+        title = f"⚠️ {label} budget at {int(pct)}%"
+    subtitle = f"Spent ${spent:.2f} of ${budget:.2f} budget"
+    message = f"{pct:.0f}% of {window_name} cap"
+    return title, subtitle, message
+
+
+async def _maybe_check_budgets(s: AppState) -> None:
+    """Evaluate rolling-window spend against configured budgets, notify once
+    per (window, tier) per daemon uptime.
+
+    Rate-limited to once per ``_BUDGET_CHECK_INTERVAL_SECONDS``. Gated on:
+      * ``budgets.enabled == True``
+      * ``plan == "api"`` (dollar amounts only meaningful on the metered plan)
+      * ``s.state`` is connected (no DB → no spend data)
+
+    Design choice (#v1): the notified_* sets are never reset. If a user
+    crosses their daily budget at 11pm and the daemon stays up overnight,
+    we do NOT re-warn them at midnight on the calendar boundary. The use
+    case is "tell me once today" — calendar-midnight resets would either
+    require an actual timezone (we store UTC) or arbitrary "next 24h"
+    semantics that surprise users. Restart the daemon to clear the gates.
+    """
+    if s.state is None or s.state._conn is None:
+        return
+    now = time.monotonic()
+    if (now - s.last_budget_check_at) < _BUDGET_CHECK_INTERVAL_SECONDS:
+        return
+    s.last_budget_check_at = now
+
+    cfg = (s.config or {}).get("budgets", {}) or {}
+    if not bool(cfg.get("enabled")):
+        return
+    plan = (s.config or {}).get("plan", "api")
+    if plan != "api":
+        return
+    notif_cfg = (s.config or {}).get("notifications", {}) or {}
+    if not bool(notif_cfg.get("enabled", True)):
+        # Honor the global notifications switch — budget alerts are still
+        # notifications and shouldn't fire when the user has muted all of them.
+        return
+
+    try:
+        warn_at = float(cfg.get("warn_at_percent", 80))
+    except (TypeError, ValueError):
+        warn_at = 80.0
+
+    for window_name, key, hours in _BUDGET_WINDOWS:
+        try:
+            budget = float(cfg.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            budget = 0.0
+        if budget <= 0:
+            # A zero/negative budget for this window: skip (treat as "not set").
+            continue
+        try:
+            spent = await s.state.cost_in_window(hours)
+        except Exception as e:  # noqa: BLE001
+            log.warning("budget check: cost_in_window(%d) failed: %s", hours, e)
+            continue
+        pct = (spent / budget) * 100.0 if budget > 0 else 0.0
+
+        if pct >= 100.0 and window_name not in s.notified_budget_exceeded:
+            title, subtitle, message = _format_budget_notification(
+                window_name, spent, budget, pct, tier="exceeded"
+            )
+            asyncio.create_task(
+                notify(
+                    title=title,
+                    message=message,
+                    subtitle=subtitle,
+                    group=f"claudewatch-budget-{window_name}",
+                )
+            )
+            s.notified_budget_exceeded.add(window_name)
+            # Also mark "approaching" as fired so we don't redundantly
+            # warn at 80% after we've already crossed 100%.
+            s.notified_budget_approaching.add(window_name)
+        elif 50.0 <= warn_at <= 100.0 and pct >= warn_at and window_name not in s.notified_budget_approaching:
+            title, subtitle, message = _format_budget_notification(
+                window_name, spent, budget, pct, tier="approaching"
+            )
+            asyncio.create_task(
+                notify(
+                    title=title,
+                    message=message,
+                    subtitle=subtitle,
+                    group=f"claudewatch-budget-{window_name}",
+                )
+            )
+            s.notified_budget_approaching.add(window_name)
+
+
 async def _maybe_prune(s: AppState) -> None:
     """Periodic in-loop prune. Called from the main scheduler loop, no extra timer."""
     now = time.time()
@@ -471,6 +607,7 @@ async def _scheduler_loop(s: AppState) -> None:
                 await s.fs_watcher.sync_active_cwds(cwds)
 
             await _maybe_prune(s)
+            await _maybe_check_budgets(s)
         except Exception as e:  # noqa: BLE001
             log.exception("scheduler iteration failed: %s", e)
             s.metrics.detector_failures_total += 1
@@ -583,6 +720,7 @@ def create_app() -> FastAPI:
     app.include_router(config_api.router)
     app.include_router(insights.router)
     app.include_router(forecast.router)
+    app.include_router(budgets.router)
     app.include_router(files.router)
     app.include_router(admin.router)
     app.include_router(metrics.router)

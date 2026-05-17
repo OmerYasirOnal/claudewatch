@@ -524,6 +524,40 @@
         </template>
       </section>
 
+      <section x-show="showBudgetsCard()" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4" data-testid="cost-budgets-card">
+        <div class="flex items-baseline justify-between gap-3 mb-3">
+          <h3 class="text-sm font-medium text-zinc-300">Budget progress</h3>
+          <span class="text-[11px] text-zinc-500">
+            <template x-if="budgetsData && budgetsData.enabled"><span>Alerts on at <span x-text="budgetsData.warn_at_percent"></span>%</span></template>
+            <template x-if="budgetsData && !budgetsData.enabled"><span>Alerts off — enable in Settings</span></template>
+          </span>
+        </div>
+        <template x-if="budgetsData && Array.isArray(budgetsData.windows)">
+          <div class="space-y-3">
+            <template x-for="w in budgetsData.windows" :key="w.window">
+              <div>
+                <div class="flex items-baseline justify-between text-xs mb-1">
+                  <span class="text-zinc-300" x-text="budgetLabel(w.window)"></span>
+                  <span class="text-zinc-400">
+                    <span x-text="fmtMoney(w.spent_usd)"></span> /
+                    <span x-text="fmtMoney(w.budget_usd)"></span>
+                    <span class="ml-1 text-zinc-500" x-text="'(' + Math.round(w.percent) + '%)'"></span>
+                  </span>
+                </div>
+                <div class="h-2 rounded-full bg-zinc-800 overflow-hidden">
+                  <div class="h-full rounded-full transition-all"
+                       :class="budgetBarColor(w.percent)"
+                       :style="'width: ' + Math.min(100, Math.max(0, Number(w.percent) || 0)) + '%;'"></div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="!budgetsData">
+          <div class="text-sm text-zinc-500">Loading budgets…</div>
+        </template>
+      </section>
+
       <section x-show="showForecastCard()" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4" data-testid="hourly-cost-card">
         <div class="flex items-baseline justify-between gap-3 mb-2">
           <h3 class="text-sm font-medium text-zinc-300">Hourly cost trend (last 7d)</h3>
@@ -1296,6 +1330,62 @@
                    x-model.number="configDraft.notifications.cost_threshold_usd"
                    :disabled="!showCost()"
                    @input="markConfigDirty()" />
+          </label>
+        </div>
+      </section>
+
+      <!-- Cost budgets -->
+      <section x-show="showCost()" data-testid="settings-budgets">
+        <h3 class="text-lg font-medium mb-2">Cost budgets</h3>
+        <p class="text-sm text-zinc-400 mb-3">
+          Get a desktop notification when rolling-window spend approaches or exceeds a cap.
+          Each window fires at most once per daemon uptime — restart the daemon to clear the gates.
+          Disabled by default. Plan must be <code class="text-emerald-300">api</code>.
+        </p>
+        <div class="space-y-3 text-sm">
+          <label class="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-zinc-800 bg-zinc-900/40">
+            <span>Enable budget alerts</span>
+            <input type="checkbox"
+                   x-model="configDraft.budgets.enabled"
+                   @change="markConfigDirty()"
+                   class="size-4 accent-emerald-500" />
+          </label>
+          <div class="grid grid-cols-3 gap-3">
+            <label class="block">
+              <span class="text-xs text-zinc-400 uppercase tracking-wide">Daily (USD)</span>
+              <input type="number" step="0.5" min="0"
+                     x-model.number="configDraft.budgets.daily_usd"
+                     @input="markConfigDirty()"
+                     :disabled="!configDraft.budgets.enabled"
+                     class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-right disabled:opacity-50" />
+            </label>
+            <label class="block">
+              <span class="text-xs text-zinc-400 uppercase tracking-wide">Weekly (USD)</span>
+              <input type="number" step="1" min="0"
+                     x-model.number="configDraft.budgets.weekly_usd"
+                     @input="markConfigDirty()"
+                     :disabled="!configDraft.budgets.enabled"
+                     class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-right disabled:opacity-50" />
+            </label>
+            <label class="block">
+              <span class="text-xs text-zinc-400 uppercase tracking-wide">Monthly (USD)</span>
+              <input type="number" step="5" min="0"
+                     x-model.number="configDraft.budgets.monthly_usd"
+                     @input="markConfigDirty()"
+                     :disabled="!configDraft.budgets.enabled"
+                     class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-right disabled:opacity-50" />
+            </label>
+          </div>
+          <label class="flex items-center justify-between gap-3">
+            <span>
+              Warn at threshold (%)
+              <span class="text-[11px] text-zinc-500 block">Fires once per window per daemon uptime (50–100).</span>
+            </span>
+            <input type="number" step="5" min="50" max="100"
+                   x-model.number="configDraft.budgets.warn_at_percent"
+                   @input="markConfigDirty()"
+                   :disabled="!configDraft.budgets.enabled"
+                   class="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 w-24 text-right disabled:opacity-50" />
           </label>
         </div>
       </section>
