@@ -105,6 +105,9 @@ function appRoot() {
     adminLogsLoading: false,
     adminStatusError: null,
     adminLogsError: null,
+    // /api/metrics snapshot — populated by loadMetrics() on the Status tab.
+    metricsData: null,
+    metricsError: null,
     restartState: "idle",        // "idle" | "restarting"
     restartConfirmOpen: false,
     pruneHoursInput: 48,
@@ -870,6 +873,21 @@ function appRoot() {
       if (this._adminLogsGrepDebounce) clearTimeout(this._adminLogsGrepDebounce);
       this._adminLogsGrepDebounce = setTimeout(() => this.loadAdminLogs(), 250);
     },
+    async loadMetrics() {
+      let r;
+      try {
+        r = await fetch("/api/metrics");
+        if (r.ok) {
+          this.metricsData = await r.json();
+          this.metricsError = null;
+          return;
+        }
+      } catch (e) {
+        this.metricsError = "Network error loading metrics";
+        return;
+      }
+      this.metricsError = `Failed to load /api/metrics: HTTP ${r?.status ?? '???'}`;
+    },
     onAdminLogsLineCountChange() {
       this.loadAdminLogs();
     },
@@ -955,10 +973,12 @@ function appRoot() {
       // Initial fetches
       this.loadAdminStatus();
       this.loadAdminLogs();
+      this.loadMetrics();
       if (this._adminPollTimer) return;
       this._adminPollTimer = setInterval(() => {
         if (this.view !== "status") return;
         this.loadAdminStatus();
+        this.loadMetrics();
         if (this.adminLogsTail) this.loadAdminLogs();
       }, 5000);
     },

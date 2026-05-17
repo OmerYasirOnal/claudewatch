@@ -892,6 +892,57 @@
         </template>
       </section>
 
+      <!-- Section A2: Performance metrics card -->
+      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <header class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-medium text-zinc-200">Performance metrics</h3>
+          <span class="text-[11px] text-zinc-500">from <code>/api/metrics</code></span>
+        </header>
+
+        <template x-if="metricsError">
+          <div class="text-rose-300 text-sm mb-3" x-text="metricsError"></div>
+        </template>
+
+        <template x-if="metricsData">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Scheduler tick</span>
+              <span class="font-mono text-xs"
+                    x-text="(metricsData.scheduler_tick_duration_ms_avg || 0).toFixed(2) + 'ms avg · '
+                            + (metricsData.scheduler_tick_duration_ms_max || 0).toFixed(2) + 'ms max · '
+                            + fmtNum(metricsData.scheduler_ticks_total) + ' total'"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">iTerm refresh</span>
+              <span class="font-mono text-xs"
+                    x-text="(metricsData.iterm_refresh_duration_ms_avg || 0).toFixed(2) + 'ms · '
+                            + fmtNum(metricsData.iterm_refresh_failures_total) + ' failures'"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Broadcasts</span>
+              <span class="font-mono text-xs"
+                    x-text="fmtNum(metricsData.broadcasts_total) + ' total · '
+                            + fmtNum(metricsData.sse_subscribers) + ' live subscribers'"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Uptime</span>
+              <span class="font-mono text-xs" x-text="fmtDuration(metricsData.uptime_seconds)"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Detector failures</span>
+              <span class="font-mono text-xs" x-text="fmtNum(metricsData.detector_failures_total)"></span>
+            </div>
+            <div class="flex justify-between border-b border-zinc-900/70 py-1">
+              <span class="text-zinc-400">Last scan saw</span>
+              <span class="font-mono text-xs" x-text="fmtNum(metricsData.process_scan_last_count) + ' sessions'"></span>
+            </div>
+          </div>
+        </template>
+        <template x-if="!metricsData && !metricsError">
+          <div class="text-zinc-500 text-sm">Loading metrics…</div>
+        </template>
+      </section>
+
       <!-- Section B: Log viewer -->
       <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
         <header class="flex items-center gap-2 flex-wrap mb-3">
