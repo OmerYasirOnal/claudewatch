@@ -12,6 +12,7 @@ return zeroed-out windows (same shape so the UI degrades cleanly).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -91,13 +92,21 @@ async def budgets(request: Request) -> BudgetsResponse:
     except (TypeError, ValueError):
         warn = 80.0
 
+    # #146: fire all three cost_in_window queries concurrently — they're
+    # independent reads against the same aiosqlite connection and serializing
+    # them just adds wall-clock latency per poll (the 720h scan in particular
+    # is non-trivial on a populated DB). aiosqlite's executor pool handles
+    # the parallelism via its internal queue.
+    spent_values = await asyncio.gather(
+        *(s.state.cost_in_window(hours) for _, _, hours in _WINDOWS),
+    )
+
     windows: list[BudgetWindow] = []
-    for name, key, hours in _WINDOWS:
+    for (name, key, hours), spent in zip(_WINDOWS, spent_values, strict=True):
         try:
             budget = float(cfg.get(key, 0) or 0)
         except (TypeError, ValueError):
             budget = 0.0
-        spent = await s.state.cost_in_window(hours)
         pct = (spent / budget * 100.0) if budget > 0 else 0.0
         windows.append(
             BudgetWindow(

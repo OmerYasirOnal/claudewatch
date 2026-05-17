@@ -523,3 +523,70 @@ async def test_maybe_check_budgets_advances_clock_when_work_runs(monkeypatch, st
 
     await _maybe_check_budgets(s)
     assert s.last_budget_check_at != sentinel, "clock should advance when gates pass"
+
+
+# ---------------------------------------------------------------------------
+# #146: /api/budgets must run the three cost_in_window calls concurrently via
+# asyncio.gather, not serially.
+# ---------------------------------------------------------------------------
+
+
+async def test_budgets_endpoint_uses_gather_for_concurrency(api_app, monkeypatch):
+    """All three cost_in_window calls should be scheduled concurrently.
+
+    We assert this indirectly by tracking how many calls were in-flight at
+    once: with a serial `await` chain, every call resolves before the next
+    one starts (max concurrency = 1). With `asyncio.gather`, all three are
+    pending at once (max concurrency = 3).
+    """
+    import asyncio as _aio
+
+    client, app, st = api_app
+    in_flight = 0
+    max_in_flight = 0
+    call_lock = _aio.Lock()
+
+    async def tracked_cost_in_window(hours):
+        nonlocal in_flight, max_in_flight
+        async with call_lock:
+            in_flight += 1
+            if in_flight > max_in_flight:
+                max_in_flight = in_flight
+        # Yield enough so the other gather()-scheduled calls have a chance to
+        # enter this function before any returns.
+        await _aio.sleep(0.01)
+        async with call_lock:
+            in_flight -= 1
+        return 1.0 + hours  # any non-zero number — the response is just shape-checked
+
+    app.state.s.state.cost_in_window = tracked_cost_in_window
+
+    r = client.get("/api/budgets")
+    assert r.status_code == 200
+    data = r.json()
+    # 3 windows × non-zero spend → all 3 should report the mocked spend.
+    spend_values = sorted(w["spent_usd"] for w in data["windows"])
+    assert spend_values == sorted([1.0 + 24, 1.0 + 168, 1.0 + 720])
+    assert max_in_flight >= 2, (
+        f"expected concurrent cost_in_window calls, max_in_flight={max_in_flight}"
+    )
+
+
+async def test_budgets_endpoint_payload_unchanged_after_gather(api_app):
+    """Regression: refactor to asyncio.gather must not alter the JSON shape."""
+    client, _, st = api_app
+    now = datetime.now(timezone.utc)
+    await _insert_ended(
+        st, pid=1, started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), cost=2.50
+    )
+    r = client.get("/api/budgets")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enabled"] is True
+    assert data["warn_at_percent"] == 80.0
+    assert [w["window"] for w in data["windows"]] == ["daily", "weekly", "monthly"]
+    assert [w["hours"] for w in data["windows"]] == [24, 168, 720]
+    daily = next(w for w in data["windows"] if w["window"] == "daily")
+    assert daily["spent_usd"] == pytest.approx(2.50)
+    assert daily["budget_usd"] == pytest.approx(5.00)
+    assert daily["percent"] == pytest.approx(50.0)
