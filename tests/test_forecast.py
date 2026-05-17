@@ -237,3 +237,86 @@ async def test_forecast_custom_window_hours(app):
     assert data["observed_cost_usd"] == pytest.approx(10.0)
     assert data["hourly_rate_usd"] == pytest.approx(10.0)
     assert data["projection_24h_usd"] == pytest.approx(240.0)
+
+
+# ---------------------------------------------------------------------------
+# Plan gating (#126): non-API plans must get zero-cost responses regardless
+# of what's in the DB, since per-token cost figures don't correspond to a
+# real bill on those plans.
+# ---------------------------------------------------------------------------
+
+
+async def _seeded_app(tmp_path, plan: str | None):
+    """Build a forecast app with a seeded DB and a specific ``plan`` config."""
+    state = State(tmp_path / "state.db")
+    await state.connect()
+    await state.init_db()
+    now = datetime.now(timezone.utc)
+    await _insert_ended(
+        state,
+        pid=99,
+        started_at=now - timedelta(hours=2),
+        ended_at=now - timedelta(hours=1),
+        cost=5.0,
+        tokens=1000,
+    )
+    fastapi_app = FastAPI()
+    fastapi_app.include_router(forecast.router)
+    config = {} if plan is None else {"plan": plan}
+    fastapi_app.state.s = AppState(config=config, state=state)
+    client = TestClient(fastapi_app, base_url="http://127.0.0.1")
+    client.__enter__()
+    return client, state
+
+
+async def test_forecast_plan_api_returns_real_cost(tmp_path):
+    """plan='api' (the default billing model) returns the real DB cost."""
+    client, state = await _seeded_app(tmp_path, plan="api")
+    try:
+        r = client.get("/api/forecast?window_hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["observed_cost_usd"] == pytest.approx(5.0)
+        assert data["observed_session_count"] == 1
+        assert data["hourly_rate_usd"] > 0.0
+        assert data["projection_24h_usd"] > 0.0
+    finally:
+        client.__exit__(None, None, None)
+        await state.close()
+
+
+async def test_forecast_plan_max_zeros_cost(tmp_path):
+    """plan='max' suppresses dollar fields — same shape, zero values."""
+    client, state = await _seeded_app(tmp_path, plan="max")
+    try:
+        r = client.get("/api/forecast?window_hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        # All cost / projection fields zeroed out.
+        assert data["observed_cost_usd"] == 0.0
+        assert data["observed_session_count"] == 0
+        assert data["hourly_rate_usd"] == 0.0
+        assert data["projection_24h_usd"] == 0.0
+        assert data["projection_7d_usd"] == 0.0
+        assert data["projection_30d_usd"] == 0.0
+        # Response shape preserved so the UI doesn't break.
+        assert data["window_hours"] == 24
+        assert "as_of" in data
+    finally:
+        client.__exit__(None, None, None)
+        await state.close()
+
+
+async def test_forecast_no_plan_defaults_to_api(tmp_path):
+    """No ``plan`` key in config → behave as if plan='api' (return real cost)."""
+    client, state = await _seeded_app(tmp_path, plan=None)
+    try:
+        r = client.get("/api/forecast?window_hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        # Default behaviour: real cost is returned.
+        assert data["observed_cost_usd"] == pytest.approx(5.0)
+        assert data["observed_session_count"] == 1
+    finally:
+        client.__exit__(None, None, None)
+        await state.close()

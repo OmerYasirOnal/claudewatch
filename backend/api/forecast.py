@@ -57,8 +57,21 @@ async def forecast(
     request: Request,
     window_hours: int = Query(24, ge=1, le=720),
 ) -> ForecastResponse:
-    """Project spend over the next 24h / 7d / 30d using the trailing window."""
+    """Project spend over the next 24h / 7d / 30d using the trailing window.
+
+    Plan gating (#126): the per-token cost numbers in ``state.db`` only
+    correspond to a real bill when the user is on the metered ``api`` plan.
+    On any other plan (``pro``, ``max``, ``team``, ``free``, …) the dollar
+    figures would be unmoored from the user's actual billing model, so we
+    return a zeroed response (same shape, so the UI degrades gracefully).
+    The frontend already hides the forecast card in that case; this is
+    defense-in-depth for direct API consumers.
+    """
     s = _state(request)
+    # Default to "api" when no plan is configured (matches DEFAULT_CONFIG).
+    plan = (s.config or {}).get("plan", "api")
+    if plan != "api":
+        return _empty(window_hours)
     if s.state is None or s.state._conn is None:
         return _empty(window_hours)
 
