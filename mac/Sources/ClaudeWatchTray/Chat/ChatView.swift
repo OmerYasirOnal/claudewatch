@@ -232,10 +232,18 @@ private struct ChatEntryRow: View {
     /// particular, user-typed messages must NOT be markdown-parsed because
     /// a stray `*` or `_` would silently disappear, and tool/system entries
     /// are diagnostic strings where Markdown would just add noise.
+    ///
+    /// Issue #129: assistant text is attacker-controllable via prompt
+    /// injection / malicious MCP servers. The previous implementation used
+    /// `Text(.init(entry.text))` which would happily turn a markdown link
+    /// like `[click](javascript:alert(1))` or `[file](file:///etc/passwd)`
+    /// into a clickable Link that NSWorkspace would honor. We now parse the
+    /// markdown into an `AttributedString` ourselves and strip any `.link`
+    /// run whose URL scheme isn't in the {http, https} allowlist.
     @ViewBuilder
     private var bodyText: some View {
         if entry.role == .assistant {
-            Text(.init(entry.text))
+            Text(ChatMarkdown.sanitizedAttributedString(from: entry.text))
         } else {
             Text(entry.text)
         }
