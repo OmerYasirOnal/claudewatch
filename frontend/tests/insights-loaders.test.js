@@ -158,6 +158,165 @@ describe("_onViewChange('insights') wiring", () => {
   });
 });
 
+// #151: cost loaders + dedicated timer should only run when plan === "api".
+// Non-API plans (Max/Pro) skip both the immediate fetch and the periodic
+// timer entirely, sparing 3 SQLite hits per poll on the daemon.
+describe("_costInsightsTimer plan-gating (#151)", () => {
+  let r;
+  beforeEach(() => {
+    r = newRoot();
+    vi.useFakeTimers();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse([]));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function costUrls(calls) {
+    return calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.startsWith("/api/forecast") || u.startsWith("/api/history/hourly-cost") || u === "/api/budgets");
+  }
+
+  it("entering insights on API plan schedules _costInsightsTimer + fires cost loaders", () => {
+    r.config = { plan: "api" };
+    r.view = "insights";
+    r._onViewChange("insights");
+
+    expect(r._costInsightsTimer).not.toBeNull();
+    // Immediate fan-out to all three cost endpoints.
+    const urls = costUrls(globalThis.fetch.mock.calls);
+    expect(urls.some((u) => u.startsWith("/api/forecast"))).toBe(true);
+    expect(urls.some((u) => u.startsWith("/api/history/hourly-cost"))).toBe(true);
+    expect(urls).toContain("/api/budgets");
+
+    // Periodic tick refetches the cost endpoints.
+    globalThis.fetch.mockClear();
+    vi.advanceTimersByTime(30_000);
+    const tick = costUrls(globalThis.fetch.mock.calls);
+    expect(tick.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("entering insights on a non-API plan does NOT schedule _costInsightsTimer", () => {
+    r.config = { plan: "max" };
+    r.view = "insights";
+    r._onViewChange("insights");
+
+    expect(r._costInsightsTimer).toBeNull();
+    // No cost endpoints hit either.
+    expect(costUrls(globalThis.fetch.mock.calls)).toEqual([]);
+
+    // Even after multiple polling intervals, no cost endpoints should fire.
+    globalThis.fetch.mockClear();
+    vi.advanceTimersByTime(120_000);
+    expect(costUrls(globalThis.fetch.mock.calls)).toEqual([]);
+  });
+
+  it("loadInsights (plan-agnostic) still runs on a non-API plan", () => {
+    r.config = { plan: "max" };
+    r.view = "insights";
+    r._onViewChange("insights");
+
+    const urls = globalThis.fetch.mock.calls.map((c) => String(c[0]));
+    // /api/projects + /api/history/hourly are plan-agnostic — still scheduled.
+    expect(urls).toContain("/api/projects");
+    expect(urls).toContain("/api/history/hourly?hours=24");
+    expect(r._insightsTimer).not.toBeNull();
+  });
+
+  it("leaving the insights tab clears both timers", () => {
+    r.config = { plan: "api" };
+    r.view = "insights";
+    r._onViewChange("insights");
+    expect(r._insightsTimer).not.toBeNull();
+    expect(r._costInsightsTimer).not.toBeNull();
+
+    r.view = "dashboard";
+    r._onViewChange("dashboard");
+    expect(r._insightsTimer).toBeNull();
+    expect(r._costInsightsTimer).toBeNull();
+  });
+
+  it("flipping plan max→api via saveConfigDraft (re)starts the cost timer", async () => {
+    // Start on Max, on the insights tab — no cost timer.
+    r.config = { plan: "max", notifications: {}, remote_control: { enabled: false }, editor: { enabled: false, command: "code" }, budgets: { enabled: false, daily_usd: 5, weekly_usd: 30, monthly_usd: 100, warn_at_percent: 80 }, pricing: {} };
+    r._syncConfigDraft();
+    r.view = "insights";
+    r._onViewChange("insights");
+    expect(r._costInsightsTimer).toBeNull();
+
+    // User flips plan to api in the Settings tab and saves.
+    r.configDraft.plan = "api";
+    r.markConfigDirty();
+    const saved = JSON.parse(JSON.stringify(r.configDraft));
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse(saved));
+
+    await r.saveConfigDraft();
+
+    expect(r.config.plan).toBe("api");
+    expect(r._costInsightsTimer).not.toBeNull();
+  });
+
+  it("flipping plan api→max via saveConfigDraft tears down the cost timer", async () => {
+    r.config = { plan: "api", notifications: {}, remote_control: { enabled: false }, editor: { enabled: false, command: "code" }, budgets: { enabled: false, daily_usd: 5, weekly_usd: 30, monthly_usd: 100, warn_at_percent: 80 }, pricing: {} };
+    r._syncConfigDraft();
+    r.view = "insights";
+    r._onViewChange("insights");
+    expect(r._costInsightsTimer).not.toBeNull();
+
+    r.configDraft.plan = "max";
+    r.markConfigDirty();
+    const saved = JSON.parse(JSON.stringify(r.configDraft));
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse(saved));
+
+    await r.saveConfigDraft();
+
+    expect(r.config.plan).toBe("max");
+    expect(r._costInsightsTimer).toBeNull();
+  });
+});
+
+// #151: loaders themselves also have an inner showCost() guard so even if
+// they are invoked directly (init prime, future call site), they no-op on
+// non-API plans. Belt-and-suspenders against the daemon getting 3 spurious
+// SQLite hits.
+describe("cost loaders no-op on non-API plans (#151)", () => {
+  let r;
+  beforeEach(() => { r = newRoot(); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("loadForecast skips fetch when plan != 'api'", async () => {
+    r.config = { plan: "max" };
+    globalThis.fetch = vi.fn();
+    await r.loadForecast();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("loadHourlyCost skips fetch when plan != 'api'", async () => {
+    r.config = { plan: "max" };
+    globalThis.fetch = vi.fn();
+    await r.loadHourlyCost(168);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("loadBudgets skips fetch when plan != 'api'", async () => {
+    r.config = { plan: "max" };
+    globalThis.fetch = vi.fn();
+    await r.loadBudgets();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("all three loaders DO fetch when plan === 'api'", async () => {
+    r.config = { plan: "api" };
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({}));
+    await r.loadForecast();
+    await r.loadHourlyCost(168);
+    await r.loadBudgets();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("_renderInsightsCharts", () => {
   let r;
   beforeEach(() => {

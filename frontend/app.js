@@ -38,6 +38,11 @@ function appRoot() {
     // F2 - Insights
     insightsData: { projects: [], hourly: { bins: [] } },
     _insightsTimer: null,
+    // #151: dedicated 30s timer for the three cost-only loaders (forecast,
+    // hourly-cost, budgets). Scheduled separately so we can skip it on
+    // non-API plans entirely — avoids 3 SQLite hits per poll on the daemon
+    // for users who will never see $ amounts (showCost() returns false).
+    _costInsightsTimer: null,
 
     // Cost forecast (Insights tab)
     forecastData: null,
@@ -157,10 +162,14 @@ function appRoot() {
       this._initTheme();
       this._applyDensity();
       await Promise.all([this.loadHealth(), this.loadSessions(), this.loadStats(), this.loadConfig()]);
-      // Prime the forecast card so it has data the first time the user opens Insights.
-      this.loadForecast();
-      this.loadHourlyCost(168);
-      this.loadBudgets();
+      // Prime the forecast card so it has data the first time the user opens
+      // Insights. #151: skip on non-API plans — those users will never see
+      // $ amounts, so the round-trip + SQLite hit is wasted.
+      if (this.showCost()) {
+        this.loadForecast();
+        this.loadHourlyCost(168);
+        this.loadBudgets();
+      }
       this.connectSSE();
       this._startNowTimer();
       this._installKeydown();
@@ -417,22 +426,7 @@ function appRoot() {
       this.configDirty = false;
     },
     _normalizeConfigDraft() {
-      if (!this.configDraft.notifications) this.configDraft.notifications = {};
-      if (!this.configDraft.remote_control) this.configDraft.remote_control = { enabled: false };
-      if (!this.configDraft.plan) this.configDraft.plan = "api";
-      if (!this.configDraft.editor) this.configDraft.editor = { enabled: false, command: "code" };
-      if (typeof this.configDraft.editor.enabled !== "boolean") this.configDraft.editor.enabled = false;
-      if (!this.configDraft.editor.command) this.configDraft.editor.command = "code";
-      // Budgets — never assume keys exist; the draft must be safe for
-      // x-model bindings even on a fresh install before /api/config has
-      // returned the [budgets] section.
-      if (!this.configDraft.budgets) this.configDraft.budgets = {};
-      const b = this.configDraft.budgets;
-      if (typeof b.enabled !== "boolean") b.enabled = false;
-      if (typeof b.daily_usd !== "number") b.daily_usd = Number(b.daily_usd) || 5.0;
-      if (typeof b.weekly_usd !== "number") b.weekly_usd = Number(b.weekly_usd) || 30.0;
-      if (typeof b.monthly_usd !== "number") b.monthly_usd = Number(b.monthly_usd) || 100.0;
-      if (typeof b.warn_at_percent !== "number") b.warn_at_percent = Number(b.warn_at_percent) || 80;
+      this._normalizeConfigShape(this.configDraft);
     },
     markConfigDirty() {
       this.configDirty = JSON.stringify(this.configDraft) !== JSON.stringify(this.config);
@@ -453,6 +447,9 @@ function appRoot() {
       if (!this.configDirty) return;
       this.configSavingState = "saving";
       this.configSaveError = "";
+      // #151: capture plan pre-save so we can re-evaluate cost-loader timer
+      // scheduling if the user just switched plans.
+      const prevPlan = this.config?.plan ?? "api";
       try {
         const r = await fetch("/api/config", {
           method: "POST",
@@ -467,6 +464,11 @@ function appRoot() {
         this._normalizeConfig();
         this.chatRemoteEnabled = !!(this.config.remote_control && this.config.remote_control.enabled);
         this._syncConfigDraft();
+        if ((this.config?.plan ?? "api") !== prevPlan) {
+          // Plan flipped — start/stop the cost-loader timer immediately
+          // rather than waiting for the next tab change.
+          this._restartCostInsightsTimer();
+        }
         this.configSavingState = "saved";
         setTimeout(() => { if (this.configSavingState === "saved") this.configSavingState = "idle"; }, 2000);
       } catch (e) {
@@ -482,16 +484,27 @@ function appRoot() {
       this.view = target;
     },
     _normalizeConfig() {
-      if (!this.config.notifications) this.config.notifications = {};
-      if (!this.config.remote_control) this.config.remote_control = { enabled: false };
-      if (!this.config.plan) this.config.plan = "api";
-      if (!this.config.editor) this.config.editor = { enabled: false, command: "code" };
-      if (typeof this.config.editor.enabled !== "boolean") this.config.editor.enabled = false;
-      if (!this.config.editor.command) this.config.editor.command = "code";
-      // Keep budgets shape in sync with _normalizeConfigDraft so the dirty
-      // check (which deep-compares the two) doesn't trip on a fresh load.
-      if (!this.config.budgets) this.config.budgets = {};
-      const b = this.config.budgets;
+      this._normalizeConfigShape(this.config);
+    },
+    // #150: single source of truth for the config-shape defaults. Both
+    // ``_normalizeConfig`` (server-of-record) and ``_normalizeConfigDraft``
+    // (user-editable draft) used to carry near-identical copies of this
+    // block; new sections (e.g. budgets) had to be added in two places
+    // and the dirty-check would otherwise trip on a fresh load. Mutate
+    // ``obj`` in place so callers can pass either ``this.config`` or
+    // ``this.configDraft``.
+    _normalizeConfigShape(obj) {
+      if (!obj.notifications) obj.notifications = {};
+      if (!obj.remote_control) obj.remote_control = { enabled: false };
+      if (!obj.plan) obj.plan = "api";
+      if (!obj.editor) obj.editor = { enabled: false, command: "code" };
+      if (typeof obj.editor.enabled !== "boolean") obj.editor.enabled = false;
+      if (!obj.editor.command) obj.editor.command = "code";
+      // Budgets — never assume keys exist; the draft must be safe for
+      // x-model bindings even on a fresh install before /api/config has
+      // returned the [budgets] section.
+      if (!obj.budgets) obj.budgets = {};
+      const b = obj.budgets;
       if (typeof b.enabled !== "boolean") b.enabled = false;
       if (typeof b.daily_usd !== "number") b.daily_usd = Number(b.daily_usd) || 5.0;
       if (typeof b.weekly_usd !== "number") b.weekly_usd = Number(b.weekly_usd) || 30.0;
@@ -502,6 +515,9 @@ function appRoot() {
       return (this.config?.plan ?? "api") === "api";
     },
     async saveConfig(updates) {
+      // #151: capture plan pre-save so we can re-evaluate cost-loader timer
+      // scheduling if the user just switched plans.
+      const prevPlan = this.config?.plan ?? "api";
       try {
         const r = await fetch("/api/config", {
           method: "POST",
@@ -516,6 +532,9 @@ function appRoot() {
           // the pricing inline-edit (and similar bypass paths) don't
           // accidentally show a phantom "Unsaved changes" badge.
           if (!this.configDirty) this._syncConfigDraft();
+          if ((this.config?.plan ?? "api") !== prevPlan) {
+            this._restartCostInsightsTimer();
+          }
         }
       } catch (e) { console.warn("save config failed", e); }
     },
@@ -656,6 +675,11 @@ function appRoot() {
 
     // Cost forecast (Insights tab)
     async loadForecast() {
+      // #151: cost loaders are no-ops on non-API plans (Max/Pro users will
+      // never see $ amounts — gated by showForecastCard / showBudgetsCard).
+      // The backend returns a zero payload regardless, but skipping the
+      // round-trip saves 3 SQLite hits per 30s poll on the daemon.
+      if (!this.showCost()) return;
       let r;
       try {
         r = await fetch("/api/forecast?window_hours=24");
@@ -677,6 +701,8 @@ function appRoot() {
 
     // Hourly cost trend (Insights tab) — bar chart of last 7d of ended-session cost.
     async loadHourlyCost(hours = 168) {
+      // #151: cost loaders no-op on non-API plans (see loadForecast).
+      if (!this.showCost()) return;
       const h = Number(hours) || 168;
       let r;
       try {
@@ -732,6 +758,8 @@ function appRoot() {
 
     // Cost budgets — single endpoint returns the three windows.
     async loadBudgets() {
+      // #151: cost loaders no-op on non-API plans (see loadForecast).
+      if (!this.showCost()) return;
       let r;
       try {
         r = await fetch("/api/budgets");
@@ -791,19 +819,19 @@ function appRoot() {
         this._syncConfigDraft();
       }
       if (v === "insights") {
+        // Always-on (plan-agnostic) loaders + timer.
         this.loadInsights();
-        this.loadForecast();
-        this.loadHourlyCost(168);
-        this.loadBudgets();
         if (this._insightsTimer) clearInterval(this._insightsTimer);
         this._insightsTimer = setInterval(() => {
           this.loadInsights();
-          this.loadForecast();
-          this.loadHourlyCost(168);
-          this.loadBudgets();
         }, 30000);
+        // #151: cost loaders + timer only when the user is on the API plan.
+        // Split out so non-API users don't even schedule the periodic fetch
+        // (the inner loaders also no-op via showCost() as a safety net).
+        this._restartCostInsightsTimer();
       } else {
         if (this._insightsTimer) { clearInterval(this._insightsTimer); this._insightsTimer = null; }
+        if (this._costInsightsTimer) { clearInterval(this._costInsightsTimer); this._costInsightsTimer = null; }
       }
       if (v === "history") {
         this.loadHistory();
@@ -823,6 +851,35 @@ function appRoot() {
       }
       // Restart tile polling depending on dashboard+tile mode
       this._restartTileTimer();
+    },
+
+    /**
+     * #151: (re)evaluate the cost-loader timer based on the current plan.
+     * Called from _onViewChange("insights") on tab entry, and from
+     * saveConfigDraft / saveConfig on plan change so users who flip from
+     * Max/Pro to API get an immediate refresh + the timer starts running
+     * without having to leave-and-reenter the tab.
+     *
+     * Idempotent: clears any prior timer before re-scheduling. Only runs
+     * the loaders + schedule when the user is (a) on the insights tab and
+     * (b) on the API plan; otherwise tears down any existing timer.
+     */
+    _restartCostInsightsTimer() {
+      if (this._costInsightsTimer) {
+        clearInterval(this._costInsightsTimer);
+        this._costInsightsTimer = null;
+      }
+      if (this.view !== "insights") return;
+      if (!this.showCost()) return;
+      // Immediate fetch on (re)start so the cards aren't blank for 30s.
+      this.loadForecast();
+      this.loadHourlyCost(168);
+      this.loadBudgets();
+      this._costInsightsTimer = setInterval(() => {
+        this.loadForecast();
+        this.loadHourlyCost(168);
+        this.loadBudgets();
+      }, 30000);
     },
 
     // --- Files tab ---

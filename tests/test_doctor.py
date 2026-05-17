@@ -225,6 +225,31 @@ def test_check_pid_file_alive(tmp_path):
     assert str(os.getpid()) in r.detail
 
 
+def test_check_pid_file_handles_non_utf8_bytes(tmp_path):
+    """A binary/non-UTF-8 PID file used to crash with UnicodeDecodeError (#147)."""
+    paths = _make_paths(tmp_path, make_pid_file=False)
+    # Write arbitrary bytes that aren't valid UTF-8.
+    paths.pid_file.write_bytes(b"\xff\xfe\x00\x01\x80")
+    r = doctor.check_pid_file(paths)
+    # Decoded bytes will become non-numeric → warn (not raise).
+    assert r.status == "warn"
+    assert "non-numeric" in r.detail
+    assert r.hint is not None
+
+
+def test_check_pid_matches_admin_status_handles_non_utf8_bytes(tmp_path):
+    """PID-vs-admin check also survives a binary PID file (#147)."""
+    paths = _make_paths(tmp_path, make_pid_file=False)
+    paths.pid_file.write_bytes(b"\xff\xfe garbage")
+
+    def fake_get(url: str) -> tuple[int, dict]:
+        raise AssertionError("should not reach HTTP — PID parse fails first")
+
+    r = doctor.check_pid_matches_admin_status(paths, port=7788, http_get=fake_get)
+    assert r.status == "warn"
+    assert "unreadable" in r.detail.lower()
+
+
 # --- HTTP health check ------------------------------------------------------
 
 
@@ -269,6 +294,84 @@ def test_check_http_health_urlerror():
 
     r = doctor.check_http_health(port=7788, http_get=fake_get)
     assert r.status == "fail"
+
+
+# --- #152: _default_http_get body cap --------------------------------------
+
+
+def test_default_http_get_caps_body_read(monkeypatch):
+    """A malicious/runaway daemon returning a huge body must not OOM the doctor."""
+    cap = doctor._HTTP_BODY_MAX_BYTES
+    assert cap == 64 * 1024  # documented cap
+
+    # Forge a 1 MiB payload — way over the cap.
+    huge = b"x" * (1024 * 1024)
+
+    class FakeResp:
+        status = 200
+
+        def __init__(self) -> None:
+            self._buf = huge
+
+        def read(self, n: int = -1) -> bytes:
+            if n is None or n < 0:
+                data, self._buf = self._buf, b""
+                return data
+            data, self._buf = self._buf[:n], self._buf[n:]
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    captured: list[int | None] = []
+
+    real_resp = FakeResp()
+    # Wrap read so we can confirm the doctor never asks for more than cap+1.
+    original_read = real_resp.read
+
+    def spy_read(n: int = -1) -> bytes:
+        captured.append(n)
+        return original_read(n)
+
+    real_resp.read = spy_read  # type: ignore[method-assign]
+
+    monkeypatch.setattr(doctor.urllib.request, "urlopen", lambda req, timeout=2: real_resp)
+
+    status, body = doctor._default_http_get("http://127.0.0.1:7788/api/health")
+    assert status == 200
+    # Oversized body → dropped, returned empty.
+    assert body == {}
+    # The doctor must have requested at most cap+1 bytes — never the full payload.
+    assert captured, "expected at least one read() call"
+    assert all(
+        (n is not None and n <= cap + 1) for n in captured
+    ), f"doctor asked for too many bytes: {captured}"
+
+
+def test_default_http_get_parses_small_body(monkeypatch):
+    """Under the cap, the body is still parsed (status-quo behavior preserved)."""
+    payload = b'{"ok": true, "pid": 1234}'
+
+    class FakeResp:
+        status = 200
+
+        def read(self, n: int = -1) -> bytes:
+            return payload[:n] if n is not None and n >= 0 else payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(doctor.urllib.request, "urlopen", lambda req, timeout=2: FakeResp())
+
+    status, body = doctor._default_http_get("http://127.0.0.1:7788/api/admin/status")
+    assert status == 200
+    assert body == {"ok": True, "pid": 1234}
 
 
 # --- PID matches admin status ----------------------------------------------
@@ -470,3 +573,96 @@ def test_cli_doctor_human_output(tmp_path, monkeypatch):
     assert "[OK]" in result.output
     # Summary footer like "N ok · M warn · K fail"
     assert "ok" in result.output
+
+
+# --- #144: home-path collapse in detail/hint --------------------------------
+
+
+def test_friendly_collapses_home_prefix(monkeypatch, tmp_path):
+    """``_friendly`` replaces the user's home dir prefix with ``~``."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: fake_home))
+
+    assert doctor._friendly(fake_home / ".claudewatch") == f"~{os.sep}.claudewatch"
+    assert doctor._friendly(fake_home) == "~"
+    # Paths outside home are returned verbatim.
+    outside = tmp_path / "elsewhere" / "x"
+    assert doctor._friendly(outside) == str(outside)
+
+
+def test_check_config_dir_missing_uses_friendly_path(monkeypatch, tmp_path):
+    """When config_dir is missing under HOME, detail collapses to ``~/...``."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: fake_home))
+
+    # Build paths that *look* like they live under HOME but don't actually exist.
+    paths = doctor.DoctorPaths(
+        config_dir=fake_home / ".claudewatch",
+        config_path=fake_home / ".claudewatch" / "config.toml",
+        state_db=fake_home / ".claudewatch" / "state.db",
+        pid_file=fake_home / ".claudewatch" / "server.pid",
+        claude_log_dir=fake_home / ".claude" / "projects",
+    )
+    r = doctor.check_config_dir(paths)
+    assert r.status == "fail"
+    assert "~" in r.detail
+    assert str(fake_home) not in r.detail
+
+
+def test_check_config_file_hint_uses_friendly_path(monkeypatch, tmp_path):
+    """The hint about chmod must not leak the absolute home prefix."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    cfg_dir = fake_home / ".claudewatch"
+    cfg_dir.mkdir()
+    cfg = cfg_dir / "config.toml"
+    cfg.write_text("port=7788")
+    # Drop read permission so check_config_file hits the "not readable" branch.
+    os.chmod(cfg, 0)
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: fake_home))
+    try:
+        paths = doctor.DoctorPaths(
+            config_dir=cfg_dir,
+            config_path=cfg,
+            state_db=cfg_dir / "state.db",
+            pid_file=cfg_dir / "server.pid",
+            claude_log_dir=fake_home / ".claude" / "projects",
+        )
+        # Some sandboxes still let root read mode-0 files; only meaningful if access truly denied.
+        if os.access(cfg, os.R_OK):
+            pytest.skip("filesystem ignores mode bits in this environment")
+        r = doctor.check_config_file(paths)
+        assert r.status == "fail"
+        assert r.hint is not None
+        assert "~" in r.hint
+        assert str(fake_home) not in r.hint
+        assert str(fake_home) not in r.detail
+    finally:
+        os.chmod(cfg, 0o600)
+
+
+def test_check_pid_file_stale_hint_uses_friendly_path(monkeypatch, tmp_path):
+    """Stale-PID hint (`rm <path>`) must use ``~`` not the absolute home path."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    cfg_dir = fake_home / ".claudewatch"
+    cfg_dir.mkdir()
+    pid_file = cfg_dir / "server.pid"
+    pid_file.write_text("99999999")  # unlikely to exist
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: fake_home))
+
+    paths = doctor.DoctorPaths(
+        config_dir=cfg_dir,
+        config_path=cfg_dir / "config.toml",
+        state_db=cfg_dir / "state.db",
+        pid_file=pid_file,
+        claude_log_dir=fake_home / ".claude" / "projects",
+    )
+    r = doctor.check_pid_file(paths)
+    assert r.status == "warn"
+    assert r.hint is not None
+    assert "~" in r.hint
+    assert str(fake_home) not in r.detail
+    assert str(fake_home) not in r.hint

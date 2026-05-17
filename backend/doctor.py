@@ -85,6 +85,34 @@ def default_paths() -> DoctorPaths:
     )
 
 
+def _friendly(path: Path | str) -> str:
+    """Collapse the user's home directory prefix to ``~`` for display.
+
+    Issue #144: every ``detail``/``hint`` string used to leak the user's
+    macOS username via the absolute home path (e.g.
+    ``/Users/alice/.claudewatch``). When users paste ``claudewatch doctor``
+    output into bug reports, that's a small but real privacy ding. Route
+    every path interpolation through this helper to keep messages generic.
+
+    The collapse is purely cosmetic — the JSON output (``--json``) goes
+    through the same helper for consistency, and tests using ``tmp_path``
+    paths see no change because ``tmp_path`` never lives under ``~``.
+    """
+    s = str(path)
+    try:
+        home = str(Path.home())
+    except (RuntimeError, OSError):
+        return s
+    if not home:
+        return s
+    if s == home:
+        return "~"
+    prefix = home + os.sep
+    if s.startswith(prefix):
+        return "~" + os.sep + s[len(prefix) :]
+    return s
+
+
 # --- Environment ------------------------------------------------------------
 
 
@@ -203,54 +231,56 @@ def check_aiosqlite_import() -> CheckResult:
 
 def check_config_dir(paths: DoctorPaths) -> CheckResult:
     """FAIL if ``~/.claudewatch/`` is missing or not writable."""
+    pretty = _friendly(paths.config_dir)
     if not paths.config_dir.exists():
         return CheckResult(
             name="config_dir",
             status="fail",
-            detail=f"{paths.config_dir} does not exist",
+            detail=f"{pretty} does not exist",
             hint="Run `claudewatch start` once to create the config dir.",
         )
     if not paths.config_dir.is_dir():
         return CheckResult(
             name="config_dir",
             status="fail",
-            detail=f"{paths.config_dir} is not a directory",
+            detail=f"{pretty} is not a directory",
             hint="Remove the file at that path so claudewatch can create the dir.",
         )
     if not os.access(paths.config_dir, os.W_OK):
         return CheckResult(
             name="config_dir",
             status="fail",
-            detail=f"{paths.config_dir} is not writable",
+            detail=f"{pretty} is not writable",
             hint="Fix permissions: `chmod u+rwx ~/.claudewatch`.",
         )
     return CheckResult(
         name="config_dir",
         status="ok",
-        detail=f"{paths.config_dir} exists and is writable",
+        detail=f"{pretty} exists and is writable",
     )
 
 
 def check_config_file(paths: DoctorPaths) -> CheckResult:
     """WARN if ``config.toml`` is missing — it's auto-created on first run."""
+    pretty = _friendly(paths.config_path)
     if not paths.config_path.exists():
         return CheckResult(
             name="config_file",
             status="warn",
-            detail=f"{paths.config_path} not found",
+            detail=f"{pretty} not found",
             hint="It will be created on next `claudewatch start`.",
         )
     if not os.access(paths.config_path, os.R_OK):
         return CheckResult(
             name="config_file",
             status="fail",
-            detail=f"{paths.config_path} not readable",
-            hint=f"Fix permissions: `chmod u+r {paths.config_path}`.",
+            detail=f"{pretty} not readable",
+            hint=f"Fix permissions: `chmod u+r {pretty}`.",
         )
     return CheckResult(
         name="config_file",
         status="ok",
-        detail=f"{paths.config_path} present and readable",
+        detail=f"{pretty} present and readable",
     )
 
 
@@ -267,11 +297,12 @@ def _format_bytes(n: int) -> str:
 
 def check_state_db(paths: DoctorPaths) -> CheckResult:
     """WARN if the SQLite state DB is missing — it's auto-created on first run."""
+    pretty = _friendly(paths.state_db)
     if not paths.state_db.exists():
         return CheckResult(
             name="state_db",
             status="warn",
-            detail=f"{paths.state_db} not found",
+            detail=f"{pretty} not found",
             hint="It will be created on next `claudewatch start`.",
         )
     try:
@@ -280,7 +311,7 @@ def check_state_db(paths: DoctorPaths) -> CheckResult:
         return CheckResult(
             name="state_db",
             status="fail",
-            detail=f"Cannot stat {paths.state_db}: {e}",
+            detail=f"Cannot stat {pretty}: {e}",
             hint=None,
         )
     return CheckResult(
@@ -292,24 +323,25 @@ def check_state_db(paths: DoctorPaths) -> CheckResult:
 
 def check_claude_log_dir(paths: DoctorPaths) -> CheckResult:
     """FAIL if ``~/.claude/projects/`` doesn't exist — no sessions can be detected."""
+    pretty = _friendly(paths.claude_log_dir)
     if not paths.claude_log_dir.exists():
         return CheckResult(
             name="claude_log_dir",
             status="fail",
-            detail=f"{paths.claude_log_dir} does not exist",
+            detail=f"{pretty} does not exist",
             hint="Start a `claude` session at least once to create the log dir.",
         )
     if not paths.claude_log_dir.is_dir():
         return CheckResult(
             name="claude_log_dir",
             status="fail",
-            detail=f"{paths.claude_log_dir} is not a directory",
+            detail=f"{pretty} is not a directory",
             hint=None,
         )
     return CheckResult(
         name="claude_log_dir",
         status="ok",
-        detail=f"{paths.claude_log_dir} present",
+        detail=f"{pretty} present",
     )
 
 
@@ -328,7 +360,7 @@ def check_log_file_readable(paths: DoctorPaths) -> CheckResult:
         return CheckResult(
             name="log_file_readable",
             status="fail",
-            detail=f"Cannot enumerate {paths.claude_log_dir}: {e}",
+            detail=f"Cannot enumerate {_friendly(paths.claude_log_dir)}: {e}",
             hint=None,
         )
     if first is None:
@@ -347,14 +379,14 @@ def check_log_file_readable(paths: DoctorPaths) -> CheckResult:
         return CheckResult(
             name="log_file_readable",
             status="fail",
-            detail=f"Permission denied reading {first}",
+            detail=f"Permission denied reading {_friendly(first)}",
             hint="Fix file permissions or relaunch claudewatch with the right user.",
         )
     except OSError as e:
         return CheckResult(
             name="log_file_readable",
             status="fail",
-            detail=f"Cannot read {first}: {e}",
+            detail=f"Cannot read {_friendly(first)}: {e}",
             hint=None,
         )
     return CheckResult(
@@ -383,6 +415,7 @@ def _pid_alive(pid: int) -> bool:
 
 def check_pid_file(paths: DoctorPaths) -> CheckResult:
     """Inspect ``~/.claudewatch/server.pid`` — present? numeric? process alive?"""
+    pretty = _friendly(paths.pid_file)
     if not paths.pid_file.exists():
         return CheckResult(
             name="pid_file",
@@ -390,13 +423,18 @@ def check_pid_file(paths: DoctorPaths) -> CheckResult:
             detail="No PID file (daemon not running)",
         )
     try:
-        raw = paths.pid_file.read_text().strip()
+        # Read as bytes + decode defensively: a binary/non-UTF-8 PID file (e.g.
+        # corrupted write, accidental redirect) used to raise UnicodeDecodeError
+        # straight through `read_text()`, which is a ValueError subclass and so
+        # bypassed the OSError handler — `claudewatch doctor` then crashed with
+        # a traceback on the very situation the check exists to surface (#147).
+        raw = paths.pid_file.read_bytes().decode("ascii", errors="replace").strip()
     except OSError as e:
         return CheckResult(
             name="pid_file",
             status="warn",
             detail=f"Could not read PID file: {e}",
-            hint=f"Delete the file: `rm {paths.pid_file}`.",
+            hint=f"Delete the file: `rm {pretty}`.",
         )
     try:
         pid = int(raw)
@@ -405,14 +443,14 @@ def check_pid_file(paths: DoctorPaths) -> CheckResult:
             name="pid_file",
             status="warn",
             detail=f"PID file contains non-numeric content: {raw!r}",
-            hint=f"Delete the stale PID file: `rm {paths.pid_file}`.",
+            hint=f"Delete the stale PID file: `rm {pretty}`.",
         )
     if not _pid_alive(pid):
         return CheckResult(
             name="pid_file",
             status="warn",
-            detail=f"PID {pid} from {paths.pid_file} is not running (stale)",
-            hint=f"Delete the stale PID file: `rm {paths.pid_file}`.",
+            detail=f"PID {pid} from {pretty} is not running (stale)",
+            hint=f"Delete the stale PID file: `rm {pretty}`.",
         )
     return CheckResult(
         name="pid_file",
@@ -469,13 +507,35 @@ def check_http_health(
     )
 
 
+#: #152 — cap the response body read by ``_default_http_get`` at 64 KiB.
+#: The doctor only probes ``/api/health`` and ``/api/admin/status``, both of
+#: which return small JSON; a misbehaving daemon (or a future endpoint that
+#: accidentally streams an unbounded payload) must not be able to OOM the
+#: user's terminal. Matches the defensive posture of ``backend.api.admin``'s
+#: ``_MAX_LOG_READ_BYTES`` cap. Exposed as a module-level constant so tests
+#: can assert + tune without monkey-patching.
+_HTTP_BODY_MAX_BYTES: int = 64 * 1024
+
+
 def _default_http_get(url: str) -> tuple[int, dict]:
-    """Production-mode HTTP GET; returns ``(status_code, parsed_json_or_empty)``."""
+    """Production-mode HTTP GET; returns ``(status_code, parsed_json_or_empty)``.
+
+    Reads at most ``_HTTP_BODY_MAX_BYTES + 1`` bytes from the response — if
+    the body overruns the cap we treat it as malformed and return ``{}``.
+    The doctor only checks status codes, not body contents, so dropping an
+    unbounded body is the right defensive move.
+    """
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=2) as resp:
         status = resp.status
+        # Read one extra byte so we can tell "exactly cap" from "over cap".
+        raw = resp.read(_HTTP_BODY_MAX_BYTES + 1)
+        if len(raw) > _HTTP_BODY_MAX_BYTES:
+            # Oversized — bail out without parsing. Status code is still
+            # useful (caller only checks for 200), body is dropped.
+            return status, {}
         try:
-            body = json.loads(resp.read())
+            body = json.loads(raw) if raw else {}
             if not isinstance(body, dict):
                 body = {}
         except Exception:  # noqa: BLE001
@@ -505,7 +565,11 @@ def check_pid_matches_admin_status(
             detail="Skipped (no PID file)",
         )
     try:
-        recorded = int(paths.pid_file.read_text().strip())
+        # Decode as bytes for the same #147 reason as check_pid_file — the
+        # (OSError, ValueError) tuple does NOT include UnicodeDecodeError
+        # against some Python versions if a custom codec is registered, so
+        # be explicit and force-decode replacements before int() parsing.
+        recorded = int(paths.pid_file.read_bytes().decode("ascii", errors="replace").strip())
     except (OSError, ValueError):
         return CheckResult(
             name="pid_matches_admin_status",

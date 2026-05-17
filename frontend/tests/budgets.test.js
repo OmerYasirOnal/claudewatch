@@ -159,6 +159,65 @@ describe("budgetLabel renders friendly window names", () => {
   });
 });
 
+// #150: both _normalizeConfig and _normalizeConfigDraft now delegate to
+// _normalizeConfigShape — exercise the shared helper directly so the
+// behavior matrix is captured once for both callers.
+describe("_normalizeConfigShape (shared helper, #150)", () => {
+  let r;
+  beforeEach(() => { r = newRoot(); });
+
+  it("fills every default on a wholly-empty object", () => {
+    const o = {};
+    r._normalizeConfigShape(o);
+    expect(o.notifications).toEqual({});
+    expect(o.remote_control).toEqual({ enabled: false });
+    expect(o.plan).toBe("api");
+    expect(o.editor).toEqual({ enabled: false, command: "code" });
+    expect(o.budgets.enabled).toBe(false);
+    expect(o.budgets.daily_usd).toBe(5.0);
+    expect(o.budgets.weekly_usd).toBe(30.0);
+    expect(o.budgets.monthly_usd).toBe(100.0);
+    expect(o.budgets.warn_at_percent).toBe(80);
+  });
+
+  it("preserves caller-supplied non-default values", () => {
+    const o = {
+      notifications: { enabled: true },
+      remote_control: { enabled: true },
+      plan: "max",
+      editor: { enabled: true, command: "subl" },
+      budgets: { enabled: true, daily_usd: 1.0, weekly_usd: 7.0, monthly_usd: 30.0, warn_at_percent: 50 },
+    };
+    r._normalizeConfigShape(o);
+    expect(o.notifications.enabled).toBe(true);
+    expect(o.remote_control.enabled).toBe(true);
+    expect(o.plan).toBe("max");
+    expect(o.editor).toEqual({ enabled: true, command: "subl" });
+    expect(o.budgets.enabled).toBe(true);
+    expect(o.budgets.daily_usd).toBe(1.0);
+    expect(o.budgets.warn_at_percent).toBe(50);
+  });
+
+  it("coerces a non-boolean editor.enabled back to false", () => {
+    const o = { editor: { enabled: "yes", command: "" } };
+    r._normalizeConfigShape(o);
+    expect(o.editor.enabled).toBe(false);
+    expect(o.editor.command).toBe("code");
+  });
+
+  it("_normalizeConfig and _normalizeConfigDraft both delegate (parity check)", () => {
+    r.config = {};
+    r.configDraft = {};
+    r._normalizeConfig();
+    r._normalizeConfigDraft();
+    // Same keys, same defaults — guards against drift if either side ever
+    // re-introduces a local copy.
+    expect(Object.keys(r.config).sort()).toEqual(Object.keys(r.configDraft).sort());
+    expect(r.config.budgets).toEqual(r.configDraft.budgets);
+    expect(r.config.editor).toEqual(r.configDraft.editor);
+  });
+});
+
 describe("saveConfigDraft persists budgets", () => {
   let r;
   beforeEach(() => { r = newRoot(); });
