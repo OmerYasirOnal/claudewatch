@@ -140,6 +140,11 @@ lifespan.
 4. `_maybe_prune(s)` — calls `state.prune()` once an hour from inside the
    loop. No separate timer.
 
+Each iteration is wrapped in a `time.monotonic()` bracket so the metrics
+dataclass (below) can record the duration. The exception path bumps
+`detector_failures_total` and continues; one failed tick never kills the
+loop.
+
 ### `_iterm_refresh_loop` — every `iterm_refresh_interval_seconds` (default 5s)
 
 Calls `ItermConnectionManager.get_sessions()` and rebuilds
@@ -151,6 +156,42 @@ macOS Sonoma+, doing it on the same 2s cadence as the process scan was the
 underlying cause of issue #2 (focus stealing). A dedicated 5s loop also lets
 the main loop run as tightly as the user wants without affecting iTerm
 chatter.
+
+Same `time.monotonic()` bracket pattern as the main loop — duration is
+folded into `iterm_refresh_duration_ms_sum`, exceptions bump
+`iterm_refresh_failures_total`.
+
+## Metrics & observability
+
+`AppState.metrics` is a `Metrics` dataclass populated in-process by the
+scheduler loops, SSE generator, and `AppState.broadcast`. There is no
+external Prometheus client library — the counters are plain ints/floats and
+the `/api/metrics.prom` route hand-renders the text exposition format
+(`backend/api/metrics.py`).
+
+Instrumentation points:
+
+| Counter / gauge | Where it's bumped |
+|---|---|
+| `scheduler_ticks_total` + `scheduler_tick_duration_ms_{sum,max}` | `_scheduler_loop` `finally` block |
+| `iterm_refresh_total` + `iterm_refresh_duration_ms_sum` | `_iterm_refresh_loop` `finally` block |
+| `iterm_refresh_failures_total` | `_iterm_refresh_loop` exception handler |
+| `detector_failures_total` | `_scheduler_loop` exception handler |
+| `process_scan_last_count` | end of each successful `_scheduler_loop` body |
+| `broadcasts_total` | `AppState.broadcast` (one per fan-out call) |
+| `sse_subscribers` (gauge) | incremented at the top of the `/api/stream` generator, decremented in its `finally` so cancellation / disconnect still tracks |
+| `started_at` | set once at `AppState.__init__` via `default_factory` |
+
+The Metrics dataclass is reset on every daemon restart — counters are
+process-lifetime, not persisted. For long-horizon analytics either scrape
+the Prometheus endpoint into a real TSDB or query the SQLite history
+(`/api/history`, `/api/history/hourly`, `/api/forecast`) which *is*
+persistent.
+
+Two JSON-only derived fields, `scheduler_tick_duration_ms_avg` and
+`iterm_refresh_duration_ms_avg`, are computed on each request from the
+`_sum / _total` pair. They're omitted from the Prometheus output by design
+— promql does that better via `rate()`.
 
 ## API surface
 
@@ -165,7 +206,10 @@ live in [api-reference.md](api-reference.md).
 | `health` | `GET /health` |
 | `history` | `GET /history`, `GET /stats` |
 | `config_api` | `GET /config`, `POST /config`, `GET /pricing`, `POST /pricing` |
-| `insights` | `GET /projects`, `GET /history/hourly`, `GET /sessions/{pid}/export`, `GET /export.csv` |
+| `insights` | `GET /projects`, `GET /history/hourly`, `GET /history/hourly-cost`, `GET /sessions/{pid}/export`, `GET /export.csv` |
+| `forecast` | `GET /forecast` (rolling-window cost extrapolation) |
+| `metrics` | `GET /metrics` (JSON), `GET /metrics.prom` (Prometheus exposition) |
+| `admin` | `GET /admin/status`, `GET /admin/logs`, `POST /admin/prune`, `POST /admin/restart` |
 | `files` | `GET /file-changes`, `GET /files/diff`, `POST /files/open` |
 
 Privacy mode (`show_log_text=false`) is enforced in `sessions.py` —
@@ -181,7 +225,9 @@ Open-in-editor (`/files/open`) is gated by `config.editor.enabled`
 - **In-memory** — `AppState.sessions: dict[pid, ClaudeSession]`, the source
   of truth for the dashboard. Also `session_hashes` (diff cache),
   `iterm_loc_map` / `iterm_tty_map` (populated by the iTerm refresh loop),
-  `sse_queues` (one per connected client), `notified_high_cost_pids`.
+  `sse_queues` (one per connected client), `notified_high_cost_pids`,
+  `send_text_rate` (per-PID token bucket for `/send-text`, #88),
+  `metrics` (the dataclass above — counters / gauges).
 - **SQLite** — `~/.claudewatch/state.db`, opened once at lifespan startup as
   a single long-lived `aiosqlite.Connection` (#19) and closed at shutdown.
   Schema is one table:

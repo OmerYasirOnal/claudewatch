@@ -29,6 +29,18 @@ two-sentence cause and a fix.
   xattr -dr com.apple.quarantine /Applications/ClaudeWatch.app
   ```
 
+### Intel Mac sees "Bundled Python not found"
+
+- Older release DMGs were built single-arch (arm64 only). On an Intel Mac
+  (or under Rosetta), `PythonRunner` walks the bundle looking for
+  `python-x86_64/bin/python3` → `python/bin/python3`; if the bundle was
+  built without `UNIVERSAL=1` and you're on a non-arm64 host, neither path
+  resolves and you get this error in the popover's "Show backend status"
+  pane.
+- Fix: download a DMG built with `UNIVERSAL=1` (the published releases
+  enable this), or rebuild locally with `make UNIVERSAL=1 app && make dmg`.
+- See [mac/README — Universal builds](../mac/README.md#universal-builds-apple-silicon--intel).
+
 ### Tray menu bar icon shows but popover is empty
 
 - The Python backend failed to launch. The popover renders with no
@@ -122,6 +134,53 @@ two-sentence cause and a fix.
   placeholders.
 - Edit and verify against [anthropic.com/pricing](https://anthropic.com/pricing).
   Unknown models get `cost = null` (rendered as `—`).
+
+### Hourly cost chart is empty on a fresh install
+
+- `/api/history/hourly-cost` and the Insights cost forecast both attribute
+  spend at **session end** — only ended sessions in the SQLite history
+  contribute. A new install with no completed sessions reports zero across
+  every bin and the chart renders as a flat baseline.
+- Run a few Claude sessions to completion (let them exit, don't just kill
+  them; ended-at is populated when the scheduler detects the PID is gone),
+  then reload Insights.
+- The forecast card on the same tab also shows `$0.00` until the same
+  condition is met — by design, no point extrapolating from no data.
+
+## Dashboard / UI
+
+### Dark mode flashes light on page load
+
+- The inline `<head>` bootstrap reads `localStorage["claudewatch.theme"]`
+  and sets the `dark` / `light` class on `<html>` *before* Tailwind /
+  Alpine load, so the first paint is already in the right theme.
+- If you see a flash, the inline script isn't running before the body
+  element. Confirm `frontend/index.html` still has the bootstrap `<script>`
+  in `<head>` (not deferred, not moved into a module). The default class
+  on `<html>` is `dark` — moving the script after the body briefly shows
+  dark before re-applying light.
+- Clearing site data / `localStorage.removeItem("claudewatch.theme")`
+  resets to `auto` (follows `prefers-color-scheme`).
+
+## Metrics / observability
+
+### How to verify metrics are flowing
+
+```bash
+curl -s localhost:7788/api/metrics | jq
+curl -s localhost:7788/api/metrics.prom
+```
+
+- `scheduler_ticks_total` should be > 0 and growing every
+  `process_scan_interval_seconds`. `iterm_refresh_total` should be growing
+  every `iterm_refresh_interval_seconds`.
+- `sse_subscribers` reflects open `/api/stream` clients in real time —
+  open the dashboard, the count goes to 1; close the tab, it goes back to 0.
+- `detector_failures_total` should be 0 in steady state. A growing value
+  means scheduler iterations are raising; check `~/.claudewatch/logs/server.log`
+  for the underlying traceback.
+- The counters reset on daemon restart — they're process-lifetime, not
+  persisted. Scrape into Prometheus for anything longer-horizon.
 
 ## Files panel
 

@@ -51,7 +51,15 @@ For every active `claude` process owned by the current user:
 **Git**
 - Branch + dirty status
 
-Plus 24h history of ended sessions and hourly time-series charts.
+**Forecasts & trends**
+- Cost forecast — extrapolates spend over the next 24h / 7d / 30d from a
+  rolling window of ended sessions (default 24h, configurable per-call)
+- Hourly cost trend — bar chart of cost per hour over the trailing 7 days
+  (continuous axis, empty hours render as zero)
+
+Plus 24h history of ended sessions and hourly time-series charts, and a
+`/api/metrics` endpoint (JSON + Prometheus) for scraping scheduler and
+SSE-fan-out counters.
 
 ## Screenshots
 
@@ -73,6 +81,19 @@ Plus 24h history of ended sessions and hourly time-series charts.
 
 Killing with SIGKILL and bulk operations are intentionally not supported.
 
+## Customization
+
+- **Dark mode** — a header toggle cycles `light → dark → auto`. `auto`
+  follows `prefers-color-scheme`; the choice persists in `localStorage` and
+  is applied by an inline `<head>` script before the first paint so there's
+  no theme flash on load.
+- **Plan-aware $ visibility** — the dashboard hides dollar figures unless
+  the configured `plan` is `api` (the only metered tier). Set in Settings →
+  Plan; `pro` / `max` / `max_20x` / `team` / `free` keep token counts
+  visible but drop cost columns and the forecast card.
+- **Card visibility** — the summary cards on the dashboard can each be
+  individually hidden via the eye icon; choice persists per browser.
+
 ## Install
 
 ### Option 1 — Native .app (recommended for end users)
@@ -83,10 +104,15 @@ and drag `ClaudeWatch.app` into your `Applications` folder. Double-click to
 launch — the icon appears in your menu bar.
 
 Bundles a portable Python 3.12 + the backend, so you don't need to install
-anything else. ~78 MB on disk. macOS 14 (Sonoma) or newer required.
+anything else. macOS 14 (Sonoma) or newer required.
 
-See [mac/README.md](mac/README.md) for build, install, and DMG packaging
-details.
+DMGs published from CI with `UNIVERSAL=1` are universal binaries — the same
+`.app` runs natively on both Apple Silicon (arm64) and Intel (x86_64). Size
+on disk: ~81 MB single-arch / ~157 MB universal. The Swift menu bar binary
+is universal in either build; only the bundled Python tree differs.
+
+See [mac/README.md](mac/README.md) for build, install, DMG packaging, and
+the `UNIVERSAL=1` build path.
 
 ### Option 2 — Python install (for development / CLI)
 
