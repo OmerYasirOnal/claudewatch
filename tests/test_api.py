@@ -190,6 +190,45 @@ def test_post_config_accepts_known_keys(populated_app, tmp_path, monkeypatch):
         assert out[k] == v
 
 
+def test_post_config_accepts_budgets_block(populated_app, tmp_path, monkeypatch):
+    """#141: PR #139 shipped a budgets UI but ConfigUpdate didn't accept the
+    payload. Verify the new BudgetsConfig sub-model lets a budget save round-trip."""
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    body = {
+        "budgets": {
+            "enabled": True,
+            "daily_usd": 12.5,
+            "weekly_usd": 80.0,
+            "monthly_usd": 300.0,
+            "warn_at_percent": 75,
+        }
+    }
+    r = client.post("/api/config", json=body)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["budgets"]["enabled"] is True
+    assert out["budgets"]["daily_usd"] == 12.5
+    assert out["budgets"]["warn_at_percent"] == 75
+
+
+def test_post_config_rejects_unknown_budget_key(populated_app, tmp_path, monkeypatch):
+    """Defense in depth: extra="forbid" on BudgetsConfig still blocks junk."""
+    client, _, _ = populated_app
+    monkeypatch.setattr("backend.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("backend.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.LOGS_DIR", tmp_path / "logs")
+
+    r = client.post(
+        "/api/config",
+        json={"budgets": {"hourly_usd": 0.5}},  # not a real field
+    )
+    assert r.status_code == 422
+
+
 def test_post_pricing_rejects_string_rate(populated_app, tmp_path, monkeypatch):
     """#30 / #41: a pricing rate of "abc" must be 422, not silently accepted."""
     client, _, _ = populated_app

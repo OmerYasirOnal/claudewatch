@@ -536,13 +536,16 @@ async def _maybe_check_budgets(s: AppState) -> None:
             title, subtitle, message = _format_budget_notification(
                 window_name, spent, budget, pct, tier="exceeded"
             )
-            asyncio.create_task(
-                notify(
-                    title=title,
-                    message=message,
-                    subtitle=subtitle,
-                    group=f"claudewatch-budget-{window_name}",
-                )
+            # Await directly — notify() already hops to asyncio.to_thread
+            # internally for the osascript call, and the deterministic
+            # ordering keeps the gate-set updates observable to tests
+            # without a fragile create_task() drain. Costs ~50ms per
+            # crossing on a 2s scheduler tick — negligible.
+            await notify(
+                title=title,
+                message=message,
+                subtitle=subtitle,
+                group=f"claudewatch-budget-{window_name}",
             )
             s.notified_budget_exceeded.add(window_name)
             # Also mark "approaching" as fired so we don't redundantly
@@ -552,13 +555,11 @@ async def _maybe_check_budgets(s: AppState) -> None:
             title, subtitle, message = _format_budget_notification(
                 window_name, spent, budget, pct, tier="approaching"
             )
-            asyncio.create_task(
-                notify(
-                    title=title,
-                    message=message,
-                    subtitle=subtitle,
-                    group=f"claudewatch-budget-{window_name}",
-                )
+            await notify(
+                title=title,
+                message=message,
+                subtitle=subtitle,
+                group=f"claudewatch-budget-{window_name}",
             )
             s.notified_budget_approaching.add(window_name)
 

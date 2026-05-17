@@ -143,25 +143,19 @@ async def test_cost_in_window_clamps_negative_rows(state):
 # --- _maybe_check_budgets — threshold tiers -------------------------------
 
 
-async def test_budget_approaching_fires_at_80_percent(fresh_app_state, monkeypatch, state):
+async def test_budget_approaching_fires_at_80_percent(fresh_app_state, monkeypatch):
+    """Mocks `state.cost_in_window` directly so the test exercises only the
+    threshold/notification logic (no aiosqlite-loop dependency that differs
+    between Python 3.10 and 3.12)."""
     mock_notify = AsyncMock()
     monkeypatch.setattr("backend.server.notify", mock_notify)
-
-    # Daily budget = $5, spend = $4 → 80%.
-    now = datetime.now(timezone.utc)
-    await _insert_ended(
-        state, pid=1, started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), cost=4.00
+    # Daily budget = $5, spend = $4 → 80%. cost_in_window is called per
+    # window (24/168/720); only the 24h call returns 4.0 so daily fires.
+    fresh_app_state.state.cost_in_window = AsyncMock(
+        side_effect=lambda hours: {24: 4.0, 168: 0.0, 720: 0.0}.get(hours, 0.0)
     )
 
     await _maybe_check_budgets(fresh_app_state)
-    # Drain the create_task() body.
-    import asyncio as _aio
-
-    for _ in range(3):
-        await _aio.sleep(0)
-    pending = [t for t in _aio.all_tasks() if t is not _aio.current_task() and not t.done()]
-    if pending:
-        await _aio.wait(pending, timeout=2.0)
 
     assert mock_notify.await_count >= 1
     titles = [call.kwargs.get("title", "") for call in mock_notify.await_args_list]
@@ -169,24 +163,15 @@ async def test_budget_approaching_fires_at_80_percent(fresh_app_state, monkeypat
     assert "daily" in fresh_app_state.notified_budget_approaching
 
 
-async def test_budget_exceeded_fires_at_100_percent(fresh_app_state, monkeypatch, state):
+async def test_budget_exceeded_fires_at_100_percent(fresh_app_state, monkeypatch):
     mock_notify = AsyncMock()
     monkeypatch.setattr("backend.server.notify", mock_notify)
-
     # Daily budget = $5, spend = $5 → 100% exactly.
-    now = datetime.now(timezone.utc)
-    await _insert_ended(
-        state, pid=1, started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), cost=5.00
+    fresh_app_state.state.cost_in_window = AsyncMock(
+        side_effect=lambda hours: {24: 5.0, 168: 0.0, 720: 0.0}.get(hours, 0.0)
     )
 
     await _maybe_check_budgets(fresh_app_state)
-    import asyncio as _aio
-
-    for _ in range(3):
-        await _aio.sleep(0)
-    pending = [t for t in _aio.all_tasks() if t is not _aio.current_task() and not t.done()]
-    if pending:
-        await _aio.wait(pending, timeout=2.0)
 
     titles = [call.kwargs.get("title", "") for call in mock_notify.await_args_list]
     assert any("Daily budget exceeded" in t for t in titles)

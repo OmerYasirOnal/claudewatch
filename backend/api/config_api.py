@@ -32,6 +32,21 @@ class RemoteControlUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class BudgetsConfig(BaseModel):
+    # #141: PR #139 shipped the [budgets] block in DEFAULT_CONFIG and a
+    # Settings-UI card, but ConfigUpdate uses extra="forbid" without a
+    # `budgets` field — so POST /api/config rejected the payload and
+    # users couldn't actually save budget changes. This sub-model fixes
+    # that. All fields nullable so the UI can do partial updates.
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    daily_usd: float | None = Field(default=None, ge=0)
+    weekly_usd: float | None = Field(default=None, ge=0)
+    monthly_usd: float | None = Field(default=None, ge=0)
+    warn_at_percent: int | None = Field(default=None, ge=1, le=100)
+
+
 class EditorConfig(BaseModel):
     # Sub-block for the opt-in "open in editor" action used by POST
     # /api/files/open. The pattern below is intentionally narrow: a shell-safe
@@ -66,6 +81,7 @@ class ConfigUpdate(BaseModel):
     pricing: dict[str, PricingEntry] | None = None
     remote_control: RemoteControlUpdate | None = None
     editor: EditorConfig | None = None
+    budgets: BudgetsConfig | None = None
 
 
 @router.get("/config")
