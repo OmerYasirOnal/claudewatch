@@ -26,11 +26,15 @@ function appRoot() {
       active_tokens: true,
       active_cost: true,
       cost_today: true,
+      cost: true,
     },
 
     // F2 - Insights
     insightsData: { projects: [], hourly: { bins: [] } },
     _insightsTimer: null,
+
+    // Cost forecast (Insights tab)
+    forecastData: null,
 
     // F3 - Search
     searchQuery: "",
@@ -118,6 +122,8 @@ function appRoot() {
       this._applyAppearance();
       this._applyDensity();
       await Promise.all([this.loadHealth(), this.loadSessions(), this.loadStats(), this.loadConfig()]);
+      // Prime the forecast card so it has data the first time the user opens Insights.
+      this.loadForecast();
       this.connectSSE();
       this._startNowTimer();
       this._installKeydown();
@@ -411,6 +417,27 @@ function appRoot() {
       this._setError(`Failed to load /api/sessions/${pid}: HTTP ${r?.status ?? '???'}`);
     },
 
+    // Cost forecast (Insights tab)
+    async loadForecast() {
+      let r;
+      try {
+        r = await fetch("/api/forecast?window_hours=24");
+        if (r && r.ok) {
+          const data = await r.json();
+          if (data && typeof data === "object") {
+            this.forecastData = data;
+          }
+          return;
+        }
+      } catch (e) {
+        // Silent — the card simply shows a placeholder until the next refresh.
+      }
+    },
+    showForecastCard() {
+      // Plan-gate: only API users see $ amounts. Plus an explicit card toggle.
+      return this.showCost() && this.cardVisibility.cost !== false;
+    },
+
     // F2 - Insights data
     async loadInsights() {
       try {
@@ -439,8 +466,9 @@ function appRoot() {
       }
       if (v === "insights") {
         this.loadInsights();
+        this.loadForecast();
         if (this._insightsTimer) clearInterval(this._insightsTimer);
-        this._insightsTimer = setInterval(() => this.loadInsights(), 30000);
+        this._insightsTimer = setInterval(() => { this.loadInsights(); this.loadForecast(); }, 30000);
       } else {
         if (this._insightsTimer) { clearInterval(this._insightsTimer); this._insightsTimer = null; }
       }
