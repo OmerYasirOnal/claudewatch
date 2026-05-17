@@ -417,22 +417,7 @@ function appRoot() {
       this.configDirty = false;
     },
     _normalizeConfigDraft() {
-      if (!this.configDraft.notifications) this.configDraft.notifications = {};
-      if (!this.configDraft.remote_control) this.configDraft.remote_control = { enabled: false };
-      if (!this.configDraft.plan) this.configDraft.plan = "api";
-      if (!this.configDraft.editor) this.configDraft.editor = { enabled: false, command: "code" };
-      if (typeof this.configDraft.editor.enabled !== "boolean") this.configDraft.editor.enabled = false;
-      if (!this.configDraft.editor.command) this.configDraft.editor.command = "code";
-      // Budgets — never assume keys exist; the draft must be safe for
-      // x-model bindings even on a fresh install before /api/config has
-      // returned the [budgets] section.
-      if (!this.configDraft.budgets) this.configDraft.budgets = {};
-      const b = this.configDraft.budgets;
-      if (typeof b.enabled !== "boolean") b.enabled = false;
-      if (typeof b.daily_usd !== "number") b.daily_usd = Number(b.daily_usd) || 5.0;
-      if (typeof b.weekly_usd !== "number") b.weekly_usd = Number(b.weekly_usd) || 30.0;
-      if (typeof b.monthly_usd !== "number") b.monthly_usd = Number(b.monthly_usd) || 100.0;
-      if (typeof b.warn_at_percent !== "number") b.warn_at_percent = Number(b.warn_at_percent) || 80;
+      this._normalizeConfigShape(this.configDraft);
     },
     markConfigDirty() {
       this.configDirty = JSON.stringify(this.configDraft) !== JSON.stringify(this.config);
@@ -482,16 +467,27 @@ function appRoot() {
       this.view = target;
     },
     _normalizeConfig() {
-      if (!this.config.notifications) this.config.notifications = {};
-      if (!this.config.remote_control) this.config.remote_control = { enabled: false };
-      if (!this.config.plan) this.config.plan = "api";
-      if (!this.config.editor) this.config.editor = { enabled: false, command: "code" };
-      if (typeof this.config.editor.enabled !== "boolean") this.config.editor.enabled = false;
-      if (!this.config.editor.command) this.config.editor.command = "code";
-      // Keep budgets shape in sync with _normalizeConfigDraft so the dirty
-      // check (which deep-compares the two) doesn't trip on a fresh load.
-      if (!this.config.budgets) this.config.budgets = {};
-      const b = this.config.budgets;
+      this._normalizeConfigShape(this.config);
+    },
+    // #150: single source of truth for the config-shape defaults. Both
+    // ``_normalizeConfig`` (server-of-record) and ``_normalizeConfigDraft``
+    // (user-editable draft) used to carry near-identical copies of this
+    // block; new sections (e.g. budgets) had to be added in two places
+    // and the dirty-check would otherwise trip on a fresh load. Mutate
+    // ``obj`` in place so callers can pass either ``this.config`` or
+    // ``this.configDraft``.
+    _normalizeConfigShape(obj) {
+      if (!obj.notifications) obj.notifications = {};
+      if (!obj.remote_control) obj.remote_control = { enabled: false };
+      if (!obj.plan) obj.plan = "api";
+      if (!obj.editor) obj.editor = { enabled: false, command: "code" };
+      if (typeof obj.editor.enabled !== "boolean") obj.editor.enabled = false;
+      if (!obj.editor.command) obj.editor.command = "code";
+      // Budgets — never assume keys exist; the draft must be safe for
+      // x-model bindings even on a fresh install before /api/config has
+      // returned the [budgets] section.
+      if (!obj.budgets) obj.budgets = {};
+      const b = obj.budgets;
       if (typeof b.enabled !== "boolean") b.enabled = false;
       if (typeof b.daily_usd !== "number") b.daily_usd = Number(b.daily_usd) || 5.0;
       if (typeof b.weekly_usd !== "number") b.weekly_usd = Number(b.weekly_usd) || 30.0;
