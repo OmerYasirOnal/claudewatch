@@ -59,6 +59,14 @@ async def forecast(
 ) -> ForecastResponse:
     """Project spend over the next 24h / 7d / 30d using the trailing window.
 
+    Plan gating (#126): the per-token cost numbers in ``state.db`` only
+    correspond to a real bill when the user is on the metered ``api`` plan.
+    On any other plan (``pro``, ``max``, ``team``, ``free``, …) the dollar
+    figures would be unmoored from the user's actual billing model, so we
+    return a zeroed response (same shape, so the UI degrades gracefully).
+    The frontend already hides the forecast card in that case; this is
+    defense-in-depth for direct API consumers.
+
     Negative ``cost_estimate`` rows (e.g. corrupted historical entries, refund
     adjustments, or out-of-tree DB writes) are clamped to zero at the SQL
     layer via ``CASE WHEN cost_estimate > 0 ...``. ``observed_cost_usd`` and
@@ -67,6 +75,10 @@ async def forecast(
     zero, ``hourly_rate_usd`` and every projection collapse to ``0.0``.
     """
     s = _state(request)
+    # Default to "api" when no plan is configured (matches DEFAULT_CONFIG).
+    plan = (s.config or {}).get("plan", "api")
+    if plan != "api":
+        return _empty(window_hours)
     if s.state is None or s.state._conn is None:
         return _empty(window_hours)
 
@@ -74,7 +86,8 @@ async def forecast(
     # Issue #125: clamp negative cost_estimate rows to 0 inside the aggregation
     # so a single bad row can't drive the entire projection negative. We also
     # belt-and-suspenders with `max(0.0, ...)` below in case a future SQL
-    # rewrite drops the CASE.
+    # rewrite drops the CASE. #128: SUM/COUNT always returns exactly one row
+    # (NULL/0 on empty input) — no need for a `if not rows` fallback branch.
     rows = await s.state._conn.execute_fetchall(
         """
         SELECT COALESCE(SUM(CASE WHEN cost_estimate > 0 THEN cost_estimate ELSE 0 END), 0) AS cost,
@@ -84,9 +97,6 @@ async def forecast(
         """,
         (cutoff,),
     )
-    if not rows:
-        return _empty(window_hours)
-
     row = dict(rows[0])
     observed_cost = max(0.0, float(row.get("cost") or 0.0))
     observed_count = int(row.get("n") or 0)

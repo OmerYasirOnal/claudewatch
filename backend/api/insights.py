@@ -130,11 +130,26 @@ async def hourly_cost(
 
     Returns a continuous time axis — empty hours appear as zero-cost bins so
     the frontend can render a stable x-axis without gap handling.
+
+    Plan gating (#126): per-token cost figures only correspond to a real bill
+    when the user is on the metered ``api`` plan. On any other plan the
+    dollar amounts would be misleading, so we return zero-cost bins (same
+    shape, so the chart still renders an empty time axis). The frontend
+    hides the chart card in that case; this is defense-in-depth for direct
+    API consumers.
     """
     s = _state(request)
+    # Default to "api" when no plan is configured (matches DEFAULT_CONFIG).
+    plan = (s.config or {}).get("plan", "api")
     if s.state is None:
         return {"hours": hours, "bins": [], "total_cost_usd": 0.0}
     bins = await s.state.hourly_cost(hours=hours)
+    if plan != "api":
+        # Preserve bin count + ordering (callers depend on a stable axis),
+        # but zero out the dollar fields so non-API-plan users never see
+        # numbers extrapolated from per-token pricing.
+        bins = [{**b, "cost_usd": 0.0} for b in bins]
+        return {"hours": hours, "bins": bins, "total_cost_usd": 0.0}
     total = round(sum(float(b.get("cost_usd") or 0.0) for b in bins), 6)
     return {"hours": hours, "bins": bins, "total_cost_usd": total}
 

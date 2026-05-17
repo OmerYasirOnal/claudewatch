@@ -15,20 +15,14 @@
     `dark` class is set on <html> immediately and we don't flash the wrong
     theme. Mirrors _applyTheme() in app.js. Reads the same localStorage
     key (claudewatch.theme); defaults to "auto" (follows OS).
+
+    Lives in /static/theme-bootstrap.js (extracted out of the inline
+    script per #127) so a future strict Content-Security-Policy can use
+    `script-src 'self'` without whitelisting 'unsafe-inline'. The tag
+    MUST stay synchronous (no defer/async) so it executes before the body
+    paints — the extra fetch is < 1ms on localhost.
   -->
-  <script>
-    (function () {
-      try {
-        var t = localStorage.getItem("claudewatch.theme") || "auto";
-        if (t !== "light" && t !== "dark" && t !== "auto") t = "auto";
-        var wantDark = t === "dark"
-          || (t === "auto" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
-        var html = document.documentElement;
-        if (wantDark) { html.classList.add("dark"); html.classList.remove("light"); }
-        else { html.classList.add("light"); html.classList.remove("dark"); }
-      } catch (e) { /* keep default */ }
-    })();
-  </script>
+  <script src="/static/theme-bootstrap.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     /* Tailwind CDN inline config — switch dark-mode from "media" (OS only)
@@ -954,6 +948,47 @@
         </template>
       </section>
 
+      <!-- Section A1: Observability sparklines -->
+      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 dark:bg-zinc-900/40 p-4">
+        <header class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-medium text-zinc-200 dark:text-zinc-200">Observability</h3>
+          <span class="text-[11px] text-zinc-500 dark:text-zinc-500">live · from <code>/api/metrics</code></span>
+        </header>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400">Scheduler ticks/min</div>
+            <canvas x-ref="sparkTicks" width="120" height="30"
+                    class="block mt-1"></canvas>
+            <div class="text-sm font-mono text-zinc-200 dark:text-zinc-200 mt-1"
+                 x-text="sparklineLast('ticks')"></div>
+          </div>
+          <div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400">Broadcasts/min</div>
+            <canvas x-ref="sparkBroadcasts" width="120" height="30"
+                    class="block mt-1"></canvas>
+            <div class="text-sm font-mono text-zinc-200 dark:text-zinc-200 mt-1"
+                 x-text="sparklineLast('broadcasts')"></div>
+          </div>
+          <div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400">Scheduler tick ms (max)</div>
+            <canvas x-ref="sparkTickMs" width="120" height="30"
+                    class="block mt-1"></canvas>
+            <div class="text-sm font-mono text-zinc-200 dark:text-zinc-200 mt-1"
+                 x-text="sparklineLast('tickMs')"></div>
+          </div>
+          <div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400">iTerm refresh/min</div>
+            <canvas x-ref="sparkIterm" width="120" height="30"
+                    class="block mt-1"></canvas>
+            <div class="text-sm font-mono text-zinc-200 dark:text-zinc-200 mt-1"
+                 x-text="sparklineLast('iterm')"></div>
+          </div>
+        </div>
+        <div class="text-xs text-zinc-500 dark:text-zinc-400 mt-3">
+          Last 5 minutes · updated every 5s
+        </div>
+      </section>
+
       <!-- Section A2: Performance metrics card -->
       <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
         <header class="flex items-center justify-between mb-3">
@@ -966,37 +1001,47 @@
         </template>
 
         <template x-if="metricsData">
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Scheduler tick</span>
-              <span class="font-mono text-xs"
-                    x-text="(metricsData.scheduler_tick_duration_ms_avg || 0).toFixed(2) + 'ms avg · '
-                            + (metricsData.scheduler_tick_duration_ms_max || 0).toFixed(2) + 'ms max · '
-                            + fmtNum(metricsData.scheduler_ticks_total) + ' total'"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">iTerm refresh</span>
-              <span class="font-mono text-xs"
-                    x-text="(metricsData.iterm_refresh_duration_ms_avg || 0).toFixed(2) + 'ms · '
-                            + fmtNum(metricsData.iterm_refresh_failures_total) + ' failures'"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Broadcasts</span>
-              <span class="font-mono text-xs"
-                    x-text="fmtNum(metricsData.broadcasts_total) + ' total · '
-                            + fmtNum(metricsData.sse_subscribers) + ' live subscribers'"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Uptime</span>
-              <span class="font-mono text-xs" x-text="fmtDuration(metricsData.uptime_seconds)"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Detector failures</span>
-              <span class="font-mono text-xs" x-text="fmtNum(metricsData.detector_failures_total)"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Last scan saw</span>
-              <span class="font-mono text-xs" x-text="fmtNum(metricsData.process_scan_last_count) + ' sessions'"></span>
+          <div>
+            <!-- #130: counters never reset over the daemon's lifetime, so the
+                 raw total can be misread as "in the last hour". Annotate it
+                 with the restart timestamp so the user has the correct frame
+                 of reference. -->
+            <div class="text-[11px] text-zinc-500 mb-2"
+                 x-text="metricsData.started_at
+                          ? ('Counters are totals since the daemon started at ' + fmtTime(metricsData.started_at) + '.')
+                          : 'Counters are totals since the daemon started.'"></div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Scheduler tick</span>
+                <span class="font-mono text-xs"
+                      x-text="(metricsData.scheduler_tick_duration_ms_avg || 0).toFixed(2) + 'ms avg · '
+                              + (metricsData.scheduler_tick_duration_ms_max || 0).toFixed(2) + 'ms max · '
+                              + fmtNum(metricsData.scheduler_ticks_total) + ' since restart'"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">iTerm refresh</span>
+                <span class="font-mono text-xs"
+                      x-text="(metricsData.iterm_refresh_duration_ms_avg || 0).toFixed(2) + 'ms · '
+                              + fmtNum(metricsData.iterm_refresh_failures_total) + ' failures since restart'"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Broadcasts</span>
+                <span class="font-mono text-xs"
+                      x-text="fmtNum(metricsData.broadcasts_total) + ' since restart · '
+                              + fmtNum(metricsData.sse_subscribers) + ' live subscribers'"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Uptime</span>
+                <span class="font-mono text-xs" x-text="fmtDuration(metricsData.uptime_seconds)"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Detector failures</span>
+                <span class="font-mono text-xs" x-text="fmtNum(metricsData.detector_failures_total) + ' since restart'"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Last scan saw</span>
+                <span class="font-mono text-xs" x-text="fmtNum(metricsData.process_scan_last_count) + ' sessions'"></span>
+              </div>
             </div>
           </div>
         </template>

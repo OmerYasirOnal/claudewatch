@@ -238,3 +238,79 @@ async def test_hourly_cost_ignores_active_sessions(app):
     data = r.json()
     assert data["total_cost_usd"] == 0.0
     assert all(b["cost_usd"] == 0.0 for b in data["bins"])
+
+
+# ---------------------------------------------------------------------------
+# Plan gating (#126): non-API plans must get zero-cost bins regardless of
+# what's in the DB, since per-token cost figures don't correspond to a real
+# bill on those plans.
+# ---------------------------------------------------------------------------
+
+
+async def _seeded_app_with_plan(tmp_path, plan: str | None):
+    """Build an insights app with a seeded DB and a specific ``plan`` config."""
+    state = State(tmp_path / "state.db")
+    await state.connect()
+    await state.init_db()
+    now = datetime.now(timezone.utc)
+    await _insert_ended(
+        state,
+        pid=1,
+        started_at=now - timedelta(hours=2),
+        ended_at=now - timedelta(hours=1),
+        cost=0.50,
+    )
+    fastapi_app = FastAPI()
+    fastapi_app.include_router(insights.router)
+    config = {} if plan is None else {"plan": plan}
+    fastapi_app.state.s = AppState(config=config, state=state)
+    client = TestClient(fastapi_app, base_url="http://127.0.0.1")
+    client.__enter__()
+    return client, state
+
+
+async def test_hourly_cost_plan_api_returns_real_cost(tmp_path):
+    """plan='api' (the default billing model) returns the real DB cost."""
+    client, state = await _seeded_app_with_plan(tmp_path, plan="api")
+    try:
+        r = client.get("/api/history/hourly-cost?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total_cost_usd"] == pytest.approx(0.50)
+        # At least one bin should have a non-zero cost.
+        assert any(b["cost_usd"] > 0 for b in data["bins"])
+    finally:
+        client.__exit__(None, None, None)
+        await state.close()
+
+
+async def test_hourly_cost_plan_max_zeros_cost(tmp_path):
+    """plan='max' zeros every bin's cost_usd + total_cost_usd, but bin axis stays intact."""
+    client, state = await _seeded_app_with_plan(tmp_path, plan="max")
+    try:
+        r = client.get("/api/history/hourly-cost?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        # All dollar figures suppressed.
+        assert data["total_cost_usd"] == 0.0
+        assert all(b["cost_usd"] == 0.0 for b in data["bins"])
+        # But the time axis (bin count + hour_start ordering) is preserved
+        # so the frontend can still render a stable chart.
+        assert len(data["bins"]) == 24
+        assert all("hour_start" in b and "session_count" in b for b in data["bins"])
+    finally:
+        client.__exit__(None, None, None)
+        await state.close()
+
+
+async def test_hourly_cost_no_plan_defaults_to_api(tmp_path):
+    """No ``plan`` key in config → behave as if plan='api' (return real cost)."""
+    client, state = await _seeded_app_with_plan(tmp_path, plan=None)
+    try:
+        r = client.get("/api/history/hourly-cost?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total_cost_usd"] == pytest.approx(0.50)
+    finally:
+        client.__exit__(None, None, None)
+        await state.close()
