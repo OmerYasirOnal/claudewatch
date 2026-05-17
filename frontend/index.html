@@ -15,20 +15,14 @@
     `dark` class is set on <html> immediately and we don't flash the wrong
     theme. Mirrors _applyTheme() in app.js. Reads the same localStorage
     key (claudewatch.theme); defaults to "auto" (follows OS).
+
+    Lives in /static/theme-bootstrap.js (extracted out of the inline
+    script per #127) so a future strict Content-Security-Policy can use
+    `script-src 'self'` without whitelisting 'unsafe-inline'. The tag
+    MUST stay synchronous (no defer/async) so it executes before the body
+    paints — the extra fetch is < 1ms on localhost.
   -->
-  <script>
-    (function () {
-      try {
-        var t = localStorage.getItem("claudewatch.theme") || "auto";
-        if (t !== "light" && t !== "dark" && t !== "auto") t = "auto";
-        var wantDark = t === "dark"
-          || (t === "auto" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
-        var html = document.documentElement;
-        if (wantDark) { html.classList.add("dark"); html.classList.remove("light"); }
-        else { html.classList.add("light"); html.classList.remove("dark"); }
-      } catch (e) { /* keep default */ }
-    })();
-  </script>
+  <script src="/static/theme-bootstrap.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     /* Tailwind CDN inline config — switch dark-mode from "media" (OS only)
