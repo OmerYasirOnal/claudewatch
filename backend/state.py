@@ -285,8 +285,9 @@ class State:
             """,
             (cutoff,),
         )
-        if not rows:
-            return 0.0
+        # #148: SUM/COUNT aggregates always return exactly one row (0 on empty
+        # input via COALESCE), so rows[0] is safe without a length check —
+        # same rationale as #128's cleanup in forecast.py.
         return max(0.0, float(dict(rows[0]).get("cost") or 0.0))
 
     async def stats_today(self) -> dict:

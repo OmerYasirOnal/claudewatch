@@ -590,3 +590,22 @@ async def test_budgets_endpoint_payload_unchanged_after_gather(api_app):
     assert daily["spent_usd"] == pytest.approx(2.50)
     assert daily["budget_usd"] == pytest.approx(5.00)
     assert daily["percent"] == pytest.approx(50.0)
+
+
+# ---------------------------------------------------------------------------
+# #148: state.cost_in_window — empty DB returns 0.0 via COALESCE, not via a
+# dead `if not rows` branch. Lock in #148's removal of the dead branch.
+# ---------------------------------------------------------------------------
+
+
+async def test_cost_in_window_empty_db_returns_zero_via_coalesce(state):
+    """COALESCE(SUM(...), 0) returns one row with cost=0 on empty input.
+
+    Locks in #148's removal of the dead `if not rows` branch — the function
+    must still return 0.0 cleanly when the sessions table is empty.
+    """
+    # Sanity: no rows inserted.
+    rows = await state._conn.execute_fetchall("SELECT COUNT(*) AS n FROM sessions")
+    assert dict(rows[0])["n"] == 0
+    assert await state.cost_in_window(24) == 0.0
+    assert await state.cost_in_window(720) == 0.0
