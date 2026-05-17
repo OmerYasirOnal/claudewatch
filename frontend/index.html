@@ -960,37 +960,47 @@
         </template>
 
         <template x-if="metricsData">
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Scheduler tick</span>
-              <span class="font-mono text-xs"
-                    x-text="(metricsData.scheduler_tick_duration_ms_avg || 0).toFixed(2) + 'ms avg · '
-                            + (metricsData.scheduler_tick_duration_ms_max || 0).toFixed(2) + 'ms max · '
-                            + fmtNum(metricsData.scheduler_ticks_total) + ' total'"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">iTerm refresh</span>
-              <span class="font-mono text-xs"
-                    x-text="(metricsData.iterm_refresh_duration_ms_avg || 0).toFixed(2) + 'ms · '
-                            + fmtNum(metricsData.iterm_refresh_failures_total) + ' failures'"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Broadcasts</span>
-              <span class="font-mono text-xs"
-                    x-text="fmtNum(metricsData.broadcasts_total) + ' total · '
-                            + fmtNum(metricsData.sse_subscribers) + ' live subscribers'"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Uptime</span>
-              <span class="font-mono text-xs" x-text="fmtDuration(metricsData.uptime_seconds)"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Detector failures</span>
-              <span class="font-mono text-xs" x-text="fmtNum(metricsData.detector_failures_total)"></span>
-            </div>
-            <div class="flex justify-between border-b border-zinc-900/70 py-1">
-              <span class="text-zinc-400">Last scan saw</span>
-              <span class="font-mono text-xs" x-text="fmtNum(metricsData.process_scan_last_count) + ' sessions'"></span>
+          <div>
+            <!-- #130: counters never reset over the daemon's lifetime, so the
+                 raw total can be misread as "in the last hour". Annotate it
+                 with the restart timestamp so the user has the correct frame
+                 of reference. -->
+            <div class="text-[11px] text-zinc-500 mb-2"
+                 x-text="metricsData.started_at
+                          ? ('Counters are totals since the daemon started at ' + fmtTime(metricsData.started_at) + '.')
+                          : 'Counters are totals since the daemon started.'"></div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Scheduler tick</span>
+                <span class="font-mono text-xs"
+                      x-text="(metricsData.scheduler_tick_duration_ms_avg || 0).toFixed(2) + 'ms avg · '
+                              + (metricsData.scheduler_tick_duration_ms_max || 0).toFixed(2) + 'ms max · '
+                              + fmtNum(metricsData.scheduler_ticks_total) + ' since restart'"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">iTerm refresh</span>
+                <span class="font-mono text-xs"
+                      x-text="(metricsData.iterm_refresh_duration_ms_avg || 0).toFixed(2) + 'ms · '
+                              + fmtNum(metricsData.iterm_refresh_failures_total) + ' failures since restart'"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Broadcasts</span>
+                <span class="font-mono text-xs"
+                      x-text="fmtNum(metricsData.broadcasts_total) + ' since restart · '
+                              + fmtNum(metricsData.sse_subscribers) + ' live subscribers'"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Uptime</span>
+                <span class="font-mono text-xs" x-text="fmtDuration(metricsData.uptime_seconds)"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Detector failures</span>
+                <span class="font-mono text-xs" x-text="fmtNum(metricsData.detector_failures_total) + ' since restart'"></span>
+              </div>
+              <div class="flex justify-between border-b border-zinc-900/70 py-1">
+                <span class="text-zinc-400">Last scan saw</span>
+                <span class="font-mono text-xs" x-text="fmtNum(metricsData.process_scan_last_count) + ' sessions'"></span>
+              </div>
             </div>
           </div>
         </template>
