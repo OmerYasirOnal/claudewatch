@@ -30,7 +30,13 @@ final class SettingsViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            let cfg = try await api.getConfig()
+            var cfg = try await api.getConfig()
+            // The backend doesn't store the Sparkle preferences (cadence is
+            // a client-only concern), so hydrate the Updates section from
+            // local UserDefaults before exposing it to the UI. Without this,
+            // every Settings open would show "Manual" + disabled regardless
+            // of what the user actually picked.
+            cfg.updates = Self.loadUpdatesFromDefaults()
             self.liveConfig = cfg
             self.draftConfig = cfg
             lastError = nil
@@ -80,9 +86,50 @@ final class SettingsViewModel: ObservableObject {
             self.liveConfig = cfg
             self.lastSavedAt = Date()
             self.lastError = nil
+            // Persist Sparkle prefs locally (backend doesn't know about them)
+            // and push them into UpdateManager so the next scheduled check
+            // picks up the new cadence without an app relaunch.
+            Self.persistUpdatesToDefaults(cfg.updates)
+            UpdateManager.shared.start(
+                enabled: cfg.updates.enabled,
+                frequencyHours: cfg.updates.frequencyHours
+            )
         } catch {
             lastError = "Save failed: \(error)"
         }
+    }
+
+    // MARK: - Updates persistence
+
+    /// `UserDefaults` keys for the Sparkle preferences. Constants so the
+    /// tests can reach in and reset / inspect state.
+    static let updatesEnabledKey = "com.omeryasironal.claudewatch.update.enabled"
+    static let updatesFrequencyKey = "com.omeryasironal.claudewatch.update.frequencyHours"
+
+    /// Re-read Sparkle preferences from UserDefaults. First-run defaults
+    /// match `UpdatesConfig()` — disabled, weekly cadence.
+    static func loadUpdatesFromDefaults() -> UpdatesConfig {
+        var c = UpdatesConfig()
+        let d = UserDefaults.standard
+        // `object(forKey:)` so we can distinguish "never set" from "set to
+        // false"; .bool(forKey:) would conflate them and force the toggle
+        // off after a save-disable round trip is impossible to detect.
+        if let enabled = d.object(forKey: updatesEnabledKey) as? Bool {
+            c.enabled = enabled
+        }
+        if let freq = d.object(forKey: updatesFrequencyKey) as? Double, freq > 0 {
+            c.frequencyHours = freq
+        }
+        return c
+    }
+
+    /// Mirror of `loadUpdatesFromDefaults` — called from `save()` after a
+    /// successful backend write so the two halves of the form persist in one
+    /// atomic-feeling step from the user's perspective.
+    static func persistUpdatesToDefaults(_ updates: UpdatesConfig) {
+        let d = UserDefaults.standard
+        d.set(updates.enabled, forKey: updatesEnabledKey)
+        d.set(updates.frequencyHours, forKey: updatesFrequencyKey)
     }
 
     /// Reset the draft to whatever the backend most recently confirmed.

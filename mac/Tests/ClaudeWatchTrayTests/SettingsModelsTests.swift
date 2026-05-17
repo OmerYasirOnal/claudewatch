@@ -64,6 +64,22 @@ final class SettingsModelsTests: XCTestCase {
         XCTAssertEqual(cfg.notifications, NotificationConfig())
         XCTAssertEqual(cfg.remoteControl, RemoteControlConfig())
         XCTAssertEqual(cfg.editor, EditorConfig())
+        XCTAssertEqual(cfg.updates, UpdatesConfig())
+    }
+
+    func testUpdatesConfigDecodesFromBackend() throws {
+        // The backend doesn't actually emit this section today (the Sparkle
+        // cadence is a client-only setting persisted to UserDefaults), but
+        // we still want the decoder to tolerate it if it ever does — and
+        // to map snake_case → camelCase the same way the other sections do.
+        let json = """
+        {
+          "updates": { "enabled": true, "frequency_hours": 24 }
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(AppConfig.self, from: json)
+        XCTAssertTrue(cfg.updates.enabled)
+        XCTAssertEqual(cfg.updates.frequencyHours, 24)
     }
 
     func testAppConfigTolerantOfWrongTypes() throws {

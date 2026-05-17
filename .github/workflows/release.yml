@@ -47,6 +47,34 @@ jobs:
         working-directory: mac
         run: shasum -a 256 dist/ClaudeWatch.dmg > dist/ClaudeWatch.dmg.sha256
 
+      # ---------------------------------------------------------------
+      # Sparkle EdDSA signing (deferred — see mac/docs/sparkle-setup.md).
+      #
+      # Once the maintainer has generated the key pair and added the
+      # private half as a repo secret (SPARKLE_ED_PRIVATE_KEY), enable
+      # this step and uncomment the appcast-append step below. Until
+      # then we ship unsigned DMGs and the Sparkle wrapper sits idle
+      # (the public key in Info.plist is still the placeholder).
+      # ---------------------------------------------------------------
+      # - name: Install sparkle-cli
+      #   run: brew install --cask sparkle
+      #
+      # - name: Sign update for Sparkle
+      #   env:
+      #     PRIV: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+      #   run: |
+      #     echo "$PRIV" > /tmp/sparkle.key
+      #     sign_update -f /tmp/sparkle.key mac/dist/ClaudeWatch.dmg \
+      #       > mac/dist/ClaudeWatch.dmg.sparkle-sig
+      #     rm /tmp/sparkle.key
+      #
+      # - name: Append appcast entry
+      #   run: ./mac/scripts/append-appcast.sh \
+      #     --version "${{ steps.ver.outputs.version }}" \
+      #     --signature-file mac/dist/ClaudeWatch.dmg.sparkle-sig \
+      #     --dmg mac/dist/ClaudeWatch.dmg \
+      #     --out docs/appcast.xml
+
       - name: Extract version from tag
         id: ver
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT

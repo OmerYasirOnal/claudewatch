@@ -13,9 +13,10 @@ struct AppConfig: Codable, Equatable {
     var notifications: NotificationConfig = .init()
     var remoteControl: RemoteControlConfig = .init()
     var editor: EditorConfig = .init()
+    var updates: UpdatesConfig = .init()
 
     enum CodingKeys: String, CodingKey {
-        case port, plan, notifications, editor
+        case port, plan, notifications, editor, updates
         case readOnly = "read_only"
         case privacyMode = "privacy_mode"
         case showLogText = "show_log_text"
@@ -38,6 +39,7 @@ struct AppConfig: Codable, Equatable {
         cfg.notifications = (try? c.decode(NotificationConfig.self, forKey: .notifications)) ?? cfg.notifications
         cfg.remoteControl = (try? c.decode(RemoteControlConfig.self, forKey: .remoteControl)) ?? cfg.remoteControl
         cfg.editor = (try? c.decode(EditorConfig.self, forKey: .editor)) ?? cfg.editor
+        cfg.updates = (try? c.decode(UpdatesConfig.self, forKey: .updates)) ?? cfg.updates
         self = cfg
     }
 
@@ -89,6 +91,33 @@ struct EditorConfig: Codable, Equatable {
         let k = try decoder.container(keyedBy: CodingKeys.self)
         c.enabled = (try? k.decode(Bool.self, forKey: .enabled)) ?? c.enabled
         c.command = (try? k.decode(String.self, forKey: .command)) ?? c.command
+        self = c
+    }
+}
+
+/// Sparkle auto-update preferences. Lives client-side only — the backend
+/// has no opinion on update cadence, so unlike other config sections this
+/// one never reaches the Python side. We piggy-back on the same draft/save
+/// machinery as the other tabs for UX consistency.
+///
+/// `frequencyHours` is stored as a Double so future tiers ("twice a day"
+/// == 12h) can be added without a schema migration. Default is weekly
+/// (168h), matching `Info.plist`'s SUScheduledCheckInterval.
+struct UpdatesConfig: Codable, Equatable {
+    var enabled: Bool = false
+    var frequencyHours: Double = 168
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case frequencyHours = "frequency_hours"
+    }
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        var c = UpdatesConfig()
+        let k = try decoder.container(keyedBy: CodingKeys.self)
+        c.enabled = (try? k.decode(Bool.self, forKey: .enabled)) ?? c.enabled
+        c.frequencyHours = (try? k.decode(Double.self, forKey: .frequencyHours)) ?? c.frequencyHours
         self = c
     }
 }

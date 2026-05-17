@@ -1,0 +1,25 @@
+<?xml version="1.0" standalone="yes"?>
+<!--
+  ClaudeWatch Sparkle appcast.
+
+  Served by GitHub Pages at:
+    https://omeryasironal.github.io/claudewatch/appcast.xml
+
+  Each release pipeline run appends a new <item> entry below the comment
+  marker. The signature is generated with `sparkle-cli sign_update` against
+  the EdDSA private key held in the maintainer's Keychain — see
+  mac/docs/sparkle-setup.md for the end-to-end recipe.
+
+  This file ships intentionally empty (no <item> entries) so the first run
+  of the auto-update flow is a clean "you're up to date" instead of a
+  partial-data error. The first real release will append the first item.
+-->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>ClaudeWatch Updates</title>
+    <link>https://omeryasironal.github.io/claudewatch/appcast.xml</link>
+    <description>Updates for the ClaudeWatch menubar app</description>
+    <language>en</language>
+    <!-- new <item> entries appended here per release -->
+  </channel>
+</rss>
