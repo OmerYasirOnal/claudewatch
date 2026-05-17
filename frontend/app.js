@@ -1616,3 +1616,9 @@ function appRoot() {
     },
   };
 }
+
+// For testing — exposes appRoot to Vitest. Browser ignores this; Alpine
+// still picks up appRoot via the global function declaration above.
+if (typeof globalThis !== "undefined") {
+  globalThis.__claudewatchAppRoot = appRoot;
+}
