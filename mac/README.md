@@ -7,9 +7,9 @@ A standalone .app for monitoring your local Claude Code sessions. Drag to
 
 | | |
 |---|---|
-| **macOS** | 14 (Sonoma) or newer, Apple Silicon |
-| **Bundle size** | ~78 MB (includes a portable Python 3.12 + the backend) |
-| **First-run cost** | ~50 MB on initial Python download (cached for rebuilds) |
+| **macOS** | 14 (Sonoma) or newer, Apple Silicon (or Intel via `UNIVERSAL=1` build) |
+| **Bundle size** | ~81 MB single-arch / ~157 MB universal (portable Python 3.12 + backend) |
+| **First-run cost** | ~50 MB on initial Python download (~100 MB universal, both cached) |
 | **Resources** | Lives entirely in `~/.claudewatch/` (config, state, logs) |
 
 ## Architecture
@@ -45,10 +45,46 @@ Targets:
 - `make python` — download python-build-standalone (cached on disk)
 - `make backend` — pip-install the claudewatch backend into the bundled python
 - `make app` — full pipeline → `dist/ClaudeWatch.app`
+- `make app-universal` — same as `UNIVERSAL=1 make app` (see below)
 - `make run` — build + launch
 - `make install` — copy to `~/Applications/ClaudeWatch.app`
 - `make dmg` — wrap in `dist/ClaudeWatch.dmg` for distribution
 - `make clean` / `make distclean`
+
+## Universal builds (Apple Silicon + Intel)
+
+Setting `UNIVERSAL=1` builds a `.app` that runs natively on both Apple
+Silicon (arm64) and Intel (x86_64) Macs. Under the hood we download both
+arch flavors of [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
+extract them side-by-side as `Contents/Resources/python-arm64/` and
+`Contents/Resources/python-x86_64/`, and let `PythonRunner.swift` pick the
+right interpreter at runtime via `#if arch(...)`. The Swift menu bar
+binary is already universal (compiled with both slices when Swift builds
+on macOS 14+); only the bundled Python needs the dual tree. We deliberately
+do NOT `lipo`-merge the full python-build-standalone distribution: it ships
+hundreds of `.so` extension modules and the merge is fragile across PBS
+releases.
+
+```bash
+make UNIVERSAL=1 app && make dmg
+# or, equivalently:
+make app-universal && make dmg
+```
+
+**Size impact (measured)**: the bundled Python (interpreter + backend
+site-packages) is the dominant cost.
+
+| Build | `.app` on disk | DMG (UDZO) |
+|-------|---------------:|-----------:|
+| Single-arch | ~81 MB | ~29 MB |
+| Universal (`UNIVERSAL=1`) | ~157 MB | ~57 MB |
+
+For a release that wants Intel coverage the ~28 MB DMG delta is acceptable;
+for personal dev builds, omit the flag.
+
+For tagged releases, set `UNIVERSAL=1` in `.github/workflows/release.yml` so
+the published DMG runs everywhere. The default `make app` invocation in CI is
+otherwise unchanged.
 
 ## Install (end user)
 
@@ -105,11 +141,11 @@ reinstalls.
 ```
 ClaudeWatch.app/Contents/
 ├── Info.plist                  LSUIElement=true → menu bar only
-├── MacOS/ClaudeWatch           Swift binary (~400 KB)
+├── MacOS/ClaudeWatch           Swift binary (~400 KB, universal)
 └── Resources/
-    ├── python/                 portable cpython-3.12.7-aarch64-darwin
-    │   ├── bin/python3
-    │   └── lib/python3.12/site-packages/
+    ├── python/                 portable cpython-3.12.7 (single-arch build)
+    │   ├── bin/python3                  ← or python-arm64/ + python-x86_64/
+    │   └── lib/python3.12/site-packages/    in a UNIVERSAL=1 build
     │       ├── backend/        the claudewatch Python package
     │       ├── fastapi/  uvicorn/  iterm2/  ...
     │       └── ...
@@ -171,5 +207,5 @@ casual users.
 - [ ] SSE consumption (`URLSession.bytes(for:)`) replacing the 3 s poll
 - [ ] Embedded chat panel using `/api/sessions/{pid}/log-stream` + `/send-text`
 - [ ] Sparkle for in-app auto-updates
-- [ ] Universal binary (x86_64 + arm64)
+- [x] Universal binary (x86_64 + arm64) — `make app-universal` / `UNIVERSAL=1`
 - [ ] Code signing + notarization in CI

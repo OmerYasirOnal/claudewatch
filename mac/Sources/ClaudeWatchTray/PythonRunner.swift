@@ -245,47 +245,94 @@ final class PythonRunner: ObservableObject {
         removePidFile()
     }
 
-    /// Find the bundled Python interpreter. Two layouts supported:
-    /// 1. Inside the .app bundle: Contents/Resources/python/bin/python3
-    /// 2. Developer mode (swift run from repo): mac/build/python/bin/python3
-    private func locatePython() throws -> (URL, URL) {
-        // Bundled
-        if let resources = Bundle.main.resourceURL {
-            let bundled = resources
-                .appendingPathComponent("python")
+    /// Host architecture suffix used for arch-specific bundled Python trees.
+    /// Universal builds ship `python-arm64/` and `python-x86_64/` side-by-side
+    /// inside the .app; single-arch builds ship one `python/` tree.
+    nonisolated static var hostArchSuffix: String {
+        #if arch(arm64)
+        return "arm64"
+        #elseif arch(x86_64)
+        return "x86_64"
+        #else
+        // Unknown — fall back to the generic `python/` lookup. The empty
+        // suffix is filtered out by locatePython().
+        return ""
+        #endif
+    }
+
+    /// Build the ordered list of `python3` candidate paths under a given
+    /// container directory. Arch-specific trees are preferred over the
+    /// legacy single `python/` tree so universal bundles pick the right
+    /// interpreter on each host.
+    ///
+    /// Exposed `internal` for unit tests; not part of any external API.
+    nonisolated static func pythonCandidates(under container: URL, archSuffix: String = hostArchSuffix) -> [URL] {
+        var names: [String] = []
+        if !archSuffix.isEmpty {
+            names.append("python-\(archSuffix)")
+        }
+        names.append("python")  // single-tree / universal-merged fallback
+        return names.map {
+            container.appendingPathComponent($0)
                 .appendingPathComponent("bin")
                 .appendingPathComponent("python3")
-            if FileManager.default.isExecutableFile(atPath: bundled.path) {
+        }
+    }
+
+    /// Walk a list of candidate `python3` paths and return the first one
+    /// that's executable, or nil. Pure function — easy to unit-test.
+    nonisolated static func firstExecutable(in candidates: [URL]) -> URL? {
+        for c in candidates {
+            if FileManager.default.isExecutableFile(atPath: c.path) {
+                return c
+            }
+        }
+        return nil
+    }
+
+    /// Find the bundled Python interpreter. Two layouts supported:
+    /// 1. Inside the .app bundle:
+    ///      Contents/Resources/python-<arch>/bin/python3  (universal build)
+    ///      Contents/Resources/python/bin/python3         (single-arch build)
+    /// 2. Developer mode (swift run from repo):
+    ///      mac/build/python-<arch>/bin/python3
+    ///      mac/build/python/bin/python3
+    private func locatePython() throws -> (URL, URL) {
+        // 1. Bundled — try arch-specific first, then generic.
+        if let resources = Bundle.main.resourceURL {
+            let candidates = Self.pythonCandidates(under: resources)
+            if let py = Self.firstExecutable(in: candidates) {
                 // Repo root for the .app = Resources/, since backend lives in site-packages.
-                return (bundled, resources)
+                return (py, resources)
             }
         }
 
-        // Dev mode: walk up from the running binary to find mac/build/python
+        // 2. Dev mode: walk up from the running binary to find mac/build/python*.
         let exe = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
-        let candidates = [
+        let devContainers = [
             exe.deletingLastPathComponent()
-                .appendingPathComponent("../../../mac/build/python/bin/python3")
+                .appendingPathComponent("../../../mac/build")
                 .standardizedFileURL,
             exe.deletingLastPathComponent()
-                .appendingPathComponent("../../mac/build/python/bin/python3")
+                .appendingPathComponent("../../mac/build")
                 .standardizedFileURL,
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("mac/build/python/bin/python3"),
+                .appendingPathComponent("mac/build"),
         ]
-        for cand in candidates {
-            if FileManager.default.isExecutableFile(atPath: cand.path) {
+        for container in devContainers {
+            let candidates = Self.pythonCandidates(under: container)
+            if let py = Self.firstExecutable(in: candidates) {
                 // Dev mode: backend module lives in the parent of mac/ (the repo root).
-                let repoRoot = cand
+                let repoRoot = py
                     .deletingLastPathComponent()                     // bin
-                    .deletingLastPathComponent()                     // python
+                    .deletingLastPathComponent()                     // python(-arch)
                     .deletingLastPathComponent()                     // build
                     .deletingLastPathComponent()                     // mac
-                return (cand, repoRoot)
+                return (py, repoRoot)
             }
         }
         throw NSError(domain: "PythonRunner", code: 1, userInfo: [
-            NSLocalizedDescriptionKey: "Bundled Python not found. Did you run `make download-python && make bundle-backend`?",
+            NSLocalizedDescriptionKey: "Bundled Python not found. Did you run `make python && make backend` (or `make UNIVERSAL=1 python && make backend`)?",
         ])
     }
 

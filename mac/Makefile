@@ -1,4 +1,4 @@
-.PHONY: all build app run install clean test python backend tray frontend dmg icon
+.PHONY: all build app app-universal run install clean test python backend tray frontend dmg icon
 .DEFAULT_GOAL := app
 
 APP_NAME     := ClaudeWatch
@@ -7,8 +7,15 @@ RESOURCES    := $(BUNDLE)/Contents/Resources
 BIN_PATH     := .build/release/ClaudeWatchTray
 BUILD_DIR    := build
 PY_DIR       := $(BUILD_DIR)/python
+PY_DIR_ARM64 := $(BUILD_DIR)/python-arm64
+PY_DIR_X8664 := $(BUILD_DIR)/python-x86_64
 REPO_ROOT    := $(realpath ..)
 ICON_ICNS    := Resources/AppIcon.icns
+
+# UNIVERSAL=1 → bundle both arm64 + x86_64 python trees so the .app runs on
+# Apple Silicon and Intel Macs. Default unset preserves the historical single-
+# arch build. See mac/README.md → "Universal builds".
+UNIVERSAL ?= 0
 
 # ───────────────────────────────── top-level targets ──────────────────────────
 
@@ -19,10 +26,17 @@ tray:
 	swift build -c release
 
 ## python — download the portable Python interpreter (~50 MB on disk).
+## With UNIVERSAL=1, downloads BOTH arm64 + x86_64 trees (~100 MB total).
 python:
-	./scripts/download-python.sh
+	@if [ "$(UNIVERSAL)" = "1" ]; then \
+		UNIVERSAL=1 ./scripts/download-python.sh; \
+	else \
+		./scripts/download-python.sh; \
+	fi
 
 ## backend — install claudewatch + deps into the bundled python.
+## Auto-detects UNIVERSAL trees from `make python UNIVERSAL=1` and installs
+## into both; otherwise falls back to single-tree install.
 backend: python
 	./scripts/bundle-backend.sh
 
@@ -33,6 +47,7 @@ icon:
 	./scripts/make-icon.sh
 
 ## app — full pipeline: tray + python + backend + assemble .app bundle.
+## With UNIVERSAL=1, ships both arm64 + x86_64 python trees (~95 MB DMG vs ~50 MB).
 app: tray python backend
 	@echo "→ Assembling $(BUNDLE)"
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(RESOURCES)
@@ -44,19 +59,39 @@ app: tray python backend
 	else \
 		echo "  ⚠ $(ICON_ICNS) missing — run 'make icon' to generate"; \
 	fi
-	@# Copy the bundled Python interpreter + site-packages
-	rm -rf $(RESOURCES)/python
-	cp -R $(PY_DIR) $(RESOURCES)/python
+	@# Copy the bundled Python interpreter(s) + site-packages.
+	@# Universal: copy BOTH arch trees and skip the legacy `python/` (the
+	@# dev-mode symlink would be useless inside the bundle anyway).
+	@# Single-arch: copy the legacy `python/` tree.
+	rm -rf $(RESOURCES)/python $(RESOURCES)/python-arm64 $(RESOURCES)/python-x86_64
+	@if [ -d $(PY_DIR_ARM64) ] && [ -d $(PY_DIR_X8664) ] && \
+	    [ ! -L $(PY_DIR_ARM64) ] && [ ! -L $(PY_DIR_X8664) ]; then \
+		echo "  → universal: copying arm64 + x86_64 python trees"; \
+		cp -R $(PY_DIR_ARM64) $(RESOURCES)/python-arm64; \
+		cp -R $(PY_DIR_X8664) $(RESOURCES)/python-x86_64; \
+	else \
+		echo "  → single-arch: copying python tree"; \
+		cp -RH $(PY_DIR) $(RESOURCES)/python; \
+	fi
 	@# Copy the dashboard frontend
 	rm -rf $(RESOURCES)/frontend
 	cp -R $(REPO_ROOT)/frontend $(RESOURCES)/frontend
 	@# Strip pip-cached __pycache__ to shrink the bundle a bit
-	find $(RESOURCES)/python -type d -name __pycache__ -prune -exec rm -rf {} +
+	@for d in $(RESOURCES)/python $(RESOURCES)/python-arm64 $(RESOURCES)/python-x86_64; do \
+		[ -d $$d ] && find $$d -type d -name __pycache__ -prune -exec rm -rf {} + || true; \
+	done
 	@echo ""
 	@echo "✓ Built $(BUNDLE)"
 	@du -sh $(BUNDLE) | awk '{print "  Bundle size: " $$1}'
-	@du -sh $(RESOURCES)/python | awk '{print "  python/:     " $$1}'
+	@[ -d $(RESOURCES)/python ] && du -sh $(RESOURCES)/python | awk '{print "  python/:        " $$1}' || true
+	@[ -d $(RESOURCES)/python-arm64 ] && du -sh $(RESOURCES)/python-arm64 | awk '{print "  python-arm64/:  " $$1}' || true
+	@[ -d $(RESOURCES)/python-x86_64 ] && du -sh $(RESOURCES)/python-x86_64 | awk '{print "  python-x86_64/: " $$1}' || true
 	@du -sh $(RESOURCES)/frontend | awk '{print "  frontend/:   " $$1}'
+
+## app-universal — convenience shortcut for `UNIVERSAL=1 make app`.
+## Produces a .app that runs natively on both Apple Silicon and Intel Macs.
+app-universal:
+	$(MAKE) UNIVERSAL=1 app
 
 ## run — build and launch the .app (kills any prior instance first).
 run: app
@@ -98,8 +133,8 @@ test:
 clean:
 	swift package clean
 	rm -rf dist
-	rm -rf $(BUILD_DIR)/python
-	@echo "  (Cached Python tarball preserved at $(BUILD_DIR)/.cache/)"
+	rm -rf $(BUILD_DIR)/python $(PY_DIR_ARM64) $(PY_DIR_X8664)
+	@echo "  (Cached Python tarball(s) preserved at $(BUILD_DIR)/.cache/)"
 
 ## distclean — also wipe the Python download cache.
 distclean: clean
