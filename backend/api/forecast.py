@@ -63,6 +63,10 @@ async def forecast(
         return _empty(window_hours)
 
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+    # SUM/COUNT aggregates always return exactly one row (NULL/0 on an empty
+    # input), so ``rows`` is guaranteed length 1. COALESCE(SUM(...), 0) guards
+    # against NULL when the table has no matching rows; no need for a fallback
+    # branch on ``not rows``.
     rows = await s.state._conn.execute_fetchall(
         """
         SELECT COALESCE(SUM(cost_estimate), 0) AS cost,
@@ -72,9 +76,6 @@ async def forecast(
         """,
         (cutoff,),
     )
-    if not rows:
-        return _empty(window_hours)
-
     row = dict(rows[0])
     observed_cost = float(row.get("cost") or 0.0)
     observed_count = int(row.get("n") or 0)
