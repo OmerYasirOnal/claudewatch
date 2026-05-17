@@ -82,6 +82,26 @@ site-packages) is the dominant cost.
 For a release that wants Intel coverage the ~28 MB DMG delta is acceptable;
 for personal dev builds, omit the flag.
 
+**Runtime arch detection.** `PythonRunner.hostArchSuffix` uses Swift's
+`#if arch(arm64) / arch(x86_64)` compile-time check to pick a suffix at
+build time per slice of the universal Swift binary. At launch,
+`locatePython()` walks `Contents/Resources/<container>` looking for, in
+order: `python-<arch>/bin/python3` (universal), `python/bin/python3`
+(single-arch / merged). The first executable wins. The Swift binary
+itself is universal in both builds — only the Python tree differs.
+
+**On Rosetta-only systems** (Intel hardware): the `x86_64` slice of the
+Swift binary runs natively, `hostArchSuffix` returns `"x86_64"`, and the
+runner picks the `python-x86_64/` tree. On a universal build everything
+just works. On a single-arch (arm64-only) build the runner falls back to
+`python/bin/python3` which is an arm64 interpreter — `posix_spawn` returns
+`ENOEXEC` and the popover shows "Bundled Python not found". See the
+[troubleshooting entry](../docs/troubleshooting.md#intel-mac-sees-bundled-python-not-found).
+
+**On Apple Silicon running an Intel-only app under Rosetta 2**: doesn't
+apply here — the Swift binary is universal, so macOS always runs the
+arm64 slice, which then loads the arm64 Python.
+
 For tagged releases, set `UNIVERSAL=1` in `.github/workflows/release.yml` so
 the published DMG runs everywhere. The default `make app` invocation in CI is
 otherwise unchanged.
@@ -121,6 +141,31 @@ The `app` target picks up `Resources/AppIcon.icns` automatically.
 2. Add `ClaudeWatch.app`
 
 (A future `claudewatch install-loginitem` command will automate this.)
+
+## Chat panel
+
+Per-session **Chat** opens a native window that streams the conversation
+log over SSE and lets you reply via `/api/sessions/{pid}/send-text`.
+
+- **Cmd+Return** sends. Plain `Return` inserts a newline (matches iMessage
+  / Cursor / the web composer). The shortcut is wired to a SwiftUI
+  `Button` with `.keyboardShortcut(.return, modifiers: [.command])` so it
+  fires even while the composer `TextEditor` has focus.
+- **Markdown rendering** — assistant turns are rendered via SwiftUI's
+  `Text(.init(string))` `LocalizedStringKey` markdown path: inline
+  formatting (bold, italics, `` `code` ``, links). User-typed,
+  tool-use, tool-result, and system entries stay plain text — a stray
+  `*` or `_` in a user message would silently disappear under markdown
+  parsing.
+- **Auto-scroll** — a `Color.clear` sentinel pinned at the bottom of the
+  transcript is `scrollTo("BOTTOM", anchor: .bottom)`'d via `withAnimation`
+  on every `vm.entries.count` change, so new turns slide into view.
+- **Focus-on-open** — the composer takes focus one runloop tick after the
+  window opens (`@FocusState` + `DispatchQueue.main.async`) so the user
+  can start typing immediately without clicking in.
+- Send requires `config.remote_control.enabled = true` (Settings → Remote
+  Control). The 403 from the backend surfaces as an inline error in the
+  composer.
 
 ## Settings (native)
 
@@ -205,7 +250,7 @@ casual users.
 
 - [ ] Actionable notifications via `UNUserNotificationCenter` (Focus/Halt buttons)
 - [ ] SSE consumption (`URLSession.bytes(for:)`) replacing the 3 s poll
-- [ ] Embedded chat panel using `/api/sessions/{pid}/log-stream` + `/send-text`
+- [x] Embedded chat panel using `/api/sessions/{pid}/log-stream` + `/send-text`
 - [ ] Sparkle for in-app auto-updates
 - [x] Universal binary (x86_64 + arm64) — `make app-universal` / `UNIVERSAL=1`
 - [ ] Code signing + notarization in CI

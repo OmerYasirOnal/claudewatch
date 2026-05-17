@@ -7,6 +7,23 @@ defence, #39).
 Tables: method, path, query/body, success shape, status codes. Full JSON
 examples only for the more complex routes.
 
+## Auth / trust model
+
+There is no auth, no CSRF token, no API key. The trust boundary is the
+loopback interface itself: the daemon binds only to `127.0.0.1` and the
+`TrustedHostMiddleware` rejects any request whose `Host` header is not
+`127.0.0.1` or `localhost` (defence-in-depth against DNS rebinding).
+
+Concretely:
+
+- Anyone with shell access to the user account can hit every endpoint.
+- Anyone on the network cannot — there is no listening socket on a routable
+  interface.
+- Mutating endpoints (`actions.*`, `config_api.POST`, `admin.POST`, plus
+  `files.open` and `actions.send-text`) are additionally gated by
+  `config.read_only`, `config.remote_control.enabled`, and
+  `config.editor.enabled` as called out below.
+
 ---
 
 ## `sessions` — live session list + per-session detail
@@ -115,6 +132,7 @@ keys are `port`, `read_only`, `privacy_mode`, `show_log_text`, `plan`
 |---|---|---|---|
 | `GET` | `/api/projects` | — | `200` — `list[ProjectRollup]` |
 | `GET` | `/api/history/hourly` | `?hours=int` (1-168, default 24) | `200` — `{bins: list[HourlyBin]}` |
+| `GET` | `/api/history/hourly-cost` | `?hours=int` (1-720, default 168) | `200` — `{hours, bins, total_cost_usd}` |
 | `GET` | `/api/sessions/{pid}/export` | — | `200 application/json` — full session as attachment |
 | `GET` | `/api/export.csv` | `?days=int` (1-30, default 7) | `200 text/csv` |
 
@@ -139,6 +157,172 @@ Combines active sessions + the last 24h of ended sessions, deduped by
 Hourly bins emit one entry per hour (oldest first) with
 `{hour, sessions_started, tokens, cost}`. Tokens/cost are attributed at
 session end.
+
+### `GET /api/history/hourly-cost` example
+
+```json
+{
+  "hours": 168,
+  "total_cost_usd": 42.317,
+  "bins": [
+    {"hour_start": "2026-05-10T00:00:00+00:00", "cost_usd": 0.0,   "session_count": 0},
+    {"hour_start": "2026-05-10T01:00:00+00:00", "cost_usd": 1.234, "session_count": 2}
+  ]
+}
+```
+
+One entry per hour over the trailing window (default 7 days, max 30 days),
+oldest first. Empty hours appear as zero-cost zero-session bins so the
+frontend can render a continuous x-axis without gap handling. Cost is
+attributed at session end (matching `/api/history/hourly`).
+
+---
+
+## `forecast` — rolling-window cost extrapolation
+
+| Method | Path | Query | Success |
+|---|---|---|---|
+| `GET` | `/api/forecast` | `?window_hours=int` (1-720, default 24) | `200` — `ForecastResponse` |
+
+```json
+{
+  "window_hours": 24,
+  "observed_cost_usd": 1.231560,
+  "observed_session_count": 7,
+  "hourly_rate_usd": 0.051315,
+  "projection_24h_usd": 1.231560,
+  "projection_7d_usd": 8.620920,
+  "projection_30d_usd": 36.946800,
+  "as_of": "2026-05-17T10:30:00+00:00"
+}
+```
+
+- Sums `cost_estimate` over the last `window_hours` of ended sessions in
+  the SQLite history. Active (still-running) sessions are excluded — cost
+  is only final at session end.
+- `hourly_rate_usd = observed_cost_usd / window_hours`. Projections are
+  `hourly_rate × {24, 168, 720}`. Flat rolling-window average, not an EMA;
+  tune the smoothing by widening `window_hours`.
+- When the SQLite state isn't reachable (early-boot or shutdown race), the
+  endpoint returns a fully-zeroed payload with `as_of` populated rather
+  than a 503 — the UI degrades gracefully on a fresh install.
+- `window_hours` is clamped to `[1, 720]` by FastAPI's `Query(ge=1, le=720)`.
+
+---
+
+## `metrics` — internal counters (JSON + Prometheus)
+
+| Method | Path | Success |
+|---|---|---|
+| `GET` | `/api/metrics` | `200 application/json` — counters dict |
+| `GET` | `/api/metrics.prom` | `200 text/plain; version=0.0.4` — Prometheus exposition |
+
+Both routes snapshot the `AppState.metrics` dataclass populated by the
+scheduler loops in `backend/server.py`. No auth — same trust model as
+`/api/admin/status`.
+
+### `GET /api/metrics` example
+
+```json
+{
+  "scheduler_ticks_total": 12345,
+  "scheduler_tick_duration_ms_sum": 184230.5,
+  "scheduler_tick_duration_ms_max": 412.8,
+  "scheduler_tick_duration_ms_avg": 14.92,
+  "iterm_refresh_total": 4938,
+  "iterm_refresh_duration_ms_sum": 23104.1,
+  "iterm_refresh_duration_ms_avg": 4.68,
+  "iterm_refresh_failures_total": 2,
+  "broadcasts_total": 18021,
+  "sse_subscribers": 1,
+  "detector_failures_total": 0,
+  "process_scan_last_count": 3,
+  "started_at": "2026-05-17T08:00:00Z",
+  "uptime_seconds": 9000
+}
+```
+
+Field semantics:
+
+- `scheduler_ticks_total` / `iterm_refresh_total` — counter, one per loop
+  iteration. The `_sum` / `_max` pairs are the cumulative and peak
+  duration in milliseconds (measured with `time.monotonic()` so NTP jumps
+  can't corrupt them).
+- `*_avg` fields are derived (`sum / total`) and only present on the JSON
+  route — Prometheus prefers to compute averages with `rate(_sum) / rate(_total)`.
+- `iterm_refresh_failures_total` / `detector_failures_total` — counter,
+  bumped on any exception in the corresponding loop.
+- `broadcasts_total` — counter, one per SSE fan-out call (`AppState.broadcast`).
+- `sse_subscribers` — **gauge**. Incremented when an `/api/stream`
+  generator starts, decremented when it exits.
+- `process_scan_last_count` — **gauge**. Number of `ClaudeSession`s
+  emitted by the most recent scheduler tick.
+- `started_at` / `uptime_seconds` — when the daemon's `AppState` was
+  constructed (UTC ISO 8601) and the seconds since then.
+
+### `GET /api/metrics.prom` example
+
+```
+# HELP claudewatch_scheduler_ticks_total Number of scheduler tick iterations
+# TYPE claudewatch_scheduler_ticks_total counter
+claudewatch_scheduler_ticks_total 12345
+# HELP claudewatch_scheduler_tick_duration_ms_sum Cumulative scheduler tick duration in milliseconds
+# TYPE claudewatch_scheduler_tick_duration_ms_sum counter
+claudewatch_scheduler_tick_duration_ms_sum 184230.5
+# HELP claudewatch_scheduler_tick_duration_ms_max Maximum observed scheduler tick duration in milliseconds
+# TYPE claudewatch_scheduler_tick_duration_ms_max gauge
+claudewatch_scheduler_tick_duration_ms_max 412.8
+...
+# HELP claudewatch_uptime_seconds Daemon uptime in seconds
+# TYPE claudewatch_uptime_seconds gauge
+claudewatch_uptime_seconds 9000
+```
+
+Each metric is prefixed `claudewatch_`. Counters end in `_total`; gauges
+don't (matches the Prometheus naming convention). The `_avg` JSON helpers
+are intentionally not exported — Grafana / promql users should
+`rate(_sum[5m]) / rate(_total[5m])` instead. Trailing newline included per
+the Prom text format spec.
+
+Scrape example:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: claudewatch
+    metrics_path: /api/metrics.prom
+    static_configs:
+      - targets: ['127.0.0.1:7788']
+```
+
+---
+
+## `admin` — daemon status, log tail, prune, restart
+
+All admin routes are mounted at `/api/admin`. Write endpoints respect
+`config.read_only` (returns 403 when true).
+
+| Method | Path | Query | Success |
+|---|---|---|---|
+| `GET` | `/api/admin/status` | — | `200` — version, uptime, DB + log stats, scheduler timing, iTerm liveness |
+| `GET` | `/api/admin/logs` | `?lines=int` (1-1000, default 100), `?grep=str` (max 200 chars) | `200` — `{path, size_bytes, lines, truncated}` |
+| `POST` | `/api/admin/prune` | `?hours=int` (1 to 24·365·100, default 48) | `200` — `{rows_deleted}` · 403 · 503 |
+| `POST` | `/api/admin/restart` | `?confirm=bool` (must be true) | `202` — `{restart_initiated: true}` · 400 · 403 |
+
+- `status` reports `version`, `uptime_seconds`, `started_at`, `pid`,
+  `python_version`, `active_sessions`, `history_rows`,
+  `history_db_size_bytes`, `log_file` (path) + `log_file_size_bytes`,
+  scheduler intervals + `last_prune_at` + `next_prune_in_seconds`, and the
+  iTerm manager's `connected` + `last_error_at`.
+- `logs` reads at most the trailing 1 MB of `~/.claudewatch/logs/server.log`,
+  then tails `lines` after optional substring `grep`. `truncated: true`
+  means the read window was smaller than the file.
+- `prune` triggers `State.prune(hours=...)` immediately and returns the
+  delta in row count.
+- `restart` SIGTERMs the daemon after a 100 ms delay so uvicorn can flush
+  the response body. Useful under launchd (`KeepAlive=true`) or the
+  bundled `.app`'s `PythonRunner` (which sees the exit and re-spawns).
+  `?confirm=true` is required so a stray `curl` can't drop the daemon.
 
 ---
 
