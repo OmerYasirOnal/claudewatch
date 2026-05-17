@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -130,6 +130,33 @@ class SendTextRequest(BaseModel):
     # If True (default), append "\n" so the line is actually submitted in
     # the target Claude REPL rather than left sitting in the input buffer.
     submit: bool = True
+
+
+TimelineEventType = Literal[
+    "started",
+    "model_switch",
+    "first_tool",
+    "tool_call",
+    "subagent_started",
+    "subagent_finished",
+    "thinking_started",
+    "permission_prompt",
+    "error",
+    "ended",
+]
+
+
+class TimelineEvent(BaseModel):
+    timestamp: datetime
+    type: TimelineEventType
+    description: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Timeline(BaseModel):
+    pid: int
+    events: list[TimelineEvent] = Field(default_factory=list)
+    truncated: bool = False  # True when source log produced > MAX_EVENTS
 
 
 class HealthReport(BaseModel):
