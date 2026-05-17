@@ -126,6 +126,47 @@ def test_parse_log_normalizes_naive_timestamps(tmp_path):
     assert pl.last_assistant_at.tzinfo is not None
 
 
+def test_parse_ts_accepts_non_standard_fractional_second_lengths():
+    """Issue #155: Python 3.10's ``datetime.fromisoformat`` only accepts
+    fractional seconds with exactly 3 or 6 digits, so a timestamp like
+    ``2026-05-17T10:00:01.5Z`` raises ``ValueError`` on 3.10 but parses on
+    3.11+. Without normalization the parser silently drops those entries,
+    which broke ``test_background_subagent_completes_via_task_notification``
+    on the 3.10 CI runner. ``_parse_ts`` now pads/truncates the fractional
+    segment to 3 or 6 digits before delegating to ``fromisoformat`` so it
+    behaves identically across all supported Python versions."""
+    from backend.detectors.conversation_log import _parse_ts
+
+    # 1-digit fractional second — the case that originally broke 3.10.
+    dt = _parse_ts("2026-05-17T10:00:01.5Z")
+    assert dt is not None
+    assert dt.year == 2026 and dt.second == 1 and dt.microsecond == 500_000
+    assert dt.tzinfo is not None
+
+    # 2-digit, 4-digit and 7-digit fractional seconds — all also rejected
+    # by 3.10's native parser; we accept them.
+    assert _parse_ts("2026-05-17T10:00:01.55Z").microsecond == 550_000
+    assert _parse_ts("2026-05-17T10:00:01.5555Z").microsecond == 555_500
+    # >6 digits get truncated to microsecond precision.
+    assert _parse_ts("2026-05-17T10:00:01.5555555Z").microsecond == 555_555
+
+    # 3-digit and 6-digit (the natively-supported cases) still round-trip
+    # cleanly.
+    assert _parse_ts("2026-05-17T10:00:01.500Z").microsecond == 500_000
+    assert _parse_ts("2026-05-17T10:00:01.500000Z").microsecond == 500_000
+
+    # Non-Z offsets with sub-millisecond fractions also normalize.
+    dt2 = _parse_ts("2026-05-17T10:00:01.5+02:00")
+    assert dt2 is not None
+    assert dt2.microsecond == 500_000
+    assert dt2.utcoffset().total_seconds() == 2 * 3600
+
+    # Garbage and empty inputs still return None.
+    assert _parse_ts(None) is None
+    assert _parse_ts("") is None
+    assert _parse_ts("not-a-timestamp") is None
+
+
 def _agent_tool_use_entry(ts: str, tool_use_id: str, description: str, subagent_type: str) -> str:
     return (
         json.dumps(
