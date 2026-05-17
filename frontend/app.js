@@ -123,6 +123,14 @@ function appRoot() {
     // /api/metrics snapshot — populated by loadMetrics() on the Status tab.
     metricsData: null,
     metricsError: null,
+    // Rolling time-series buffer (last 60 samples = ~5 min @ 5s poll). Each
+    // entry is { t: epochMs, v: number }. Counters store per-tick deltas;
+    // gauges store the raw value.
+    metricsHistory: { ticks: [], broadcasts: [], tickMs: [], iterm: [] },
+    // Previous counter snapshot — used by loadMetrics() to compute deltas.
+    _metricsPrevSnapshot: null,
+    // Coalesces redraws into a single requestAnimationFrame.
+    _sparklineRafPending: false,
     restartState: "idle",        // "idle" | "restarting"
     restartConfirmOpen: false,
     pruneHoursInput: 48,
@@ -1034,8 +1042,11 @@ function appRoot() {
       try {
         r = await fetch("/api/metrics");
         if (r.ok) {
-          this.metricsData = await r.json();
+          const payload = await r.json();
+          this.metricsData = payload;
           this.metricsError = null;
+          this._pushMetricsSample(payload);
+          this._scheduleSparklineRender();
           return;
         }
       } catch (e) {
@@ -1043,6 +1054,169 @@ function appRoot() {
         return;
       }
       this.metricsError = `Failed to load /api/metrics: HTTP ${r?.status ?? '???'}`;
+    },
+    /**
+     * Push one sample into the rolling time-series buffer. For counter fields
+     * (scheduler_ticks_total, broadcasts_total, iterm_refresh_total) we record
+     * the delta since the previous sample so the sparkline shows rate-per-tick,
+     * not the monotonic cumulative value. For gauge-like fields
+     * (scheduler_tick_duration_ms_max) we record the raw value.
+     *
+     * Defensive: if a counter decreases (daemon restart, etc.) we clamp the
+     * delta to 0 so the chart doesn't draw a negative spike.
+     *
+     * The very first sample after page load establishes the baseline — its
+     * delta is 0 by convention (we have nothing to compare against).
+     */
+    _pushMetricsSample(payload) {
+      if (!payload || typeof payload !== "object") return;
+      const now = Date.now();
+      const cur = {
+        scheduler_ticks_total: Number(payload.scheduler_ticks_total) || 0,
+        broadcasts_total: Number(payload.broadcasts_total) || 0,
+        iterm_refresh_total: Number(payload.iterm_refresh_total) || 0,
+        scheduler_tick_duration_ms_max: Number(payload.scheduler_tick_duration_ms_max) || 0,
+      };
+      const prev = this._metricsPrevSnapshot;
+      const delta = (key) => {
+        if (!prev) return 0;
+        return Math.max(0, cur[key] - prev[key]);
+      };
+      this._appendSparkPoint("ticks", { t: now, v: delta("scheduler_ticks_total") });
+      this._appendSparkPoint("broadcasts", { t: now, v: delta("broadcasts_total") });
+      this._appendSparkPoint("iterm", { t: now, v: delta("iterm_refresh_total") });
+      // Gauge — store as-is.
+      this._appendSparkPoint("tickMs", { t: now, v: cur.scheduler_tick_duration_ms_max });
+      this._metricsPrevSnapshot = cur;
+    },
+    _appendSparkPoint(key, point) {
+      const buf = this.metricsHistory[key];
+      if (!Array.isArray(buf)) return;
+      buf.push(point);
+      // Cap at 60 entries — drop the oldest.
+      while (buf.length > 60) buf.shift();
+    },
+    _scheduleSparklineRender() {
+      // Coalesce multiple loadMetrics() invocations within the same frame.
+      if (this._sparklineRafPending) return;
+      const raf = typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame
+        : (cb) => setTimeout(cb, 16);
+      this._sparklineRafPending = true;
+      raf(() => {
+        this._sparklineRafPending = false;
+        try { this._renderObservabilitySparklines(); } catch (e) { /* ignore */ }
+      });
+    },
+    /** Draw all 4 observability sparklines from this.metricsHistory. */
+    _renderObservabilitySparklines() {
+      const refs = (this && this.$refs) || {};
+      const light = this.appearance === "light";
+      const lineColor = light ? "#0f766e" : "#34d399";
+      const opts = { color: lineColor };
+      this._renderSparkline(refs.sparkTicks, this.metricsHistory.ticks, opts);
+      this._renderSparkline(refs.sparkBroadcasts, this.metricsHistory.broadcasts, opts);
+      this._renderSparkline(refs.sparkTickMs, this.metricsHistory.tickMs, {
+        color: light ? "#7c3aed" : "#a78bfa",
+      });
+      this._renderSparkline(refs.sparkIterm, this.metricsHistory.iterm, {
+        color: light ? "#b45309" : "#fbbf24",
+      });
+    },
+    /**
+     * Draw a minimal line sparkline into ``canvasEl``. Gracefully no-ops when
+     * the canvas ref isn't bound yet (jsdom, switching tabs before paint) or
+     * when getContext() isn't available (jsdom never returns one).
+     *
+     * Options: { color, showLastValue }. showAxes is always false here —
+     * sparklines are intentionally chrome-free.
+     */
+    _renderSparkline(canvasEl, points, opts) {
+      if (!canvasEl || typeof canvasEl.getContext !== "function") return;
+      const ctx = canvasEl.getContext("2d");
+      if (!ctx) return;
+      const o = opts || {};
+      const color = o.color || "#64748b";
+      const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+      // Use the CSS pixel dimensions declared on the canvas element. We rescale
+      // the backing store for DPR (anti-alias) but keep the logical size.
+      const cssW = canvasEl.width / (canvasEl._dprApplied || 1) || canvasEl.width;
+      const cssH = canvasEl.height / (canvasEl._dprApplied || 1) || canvasEl.height;
+      const W = canvasEl.getAttribute("width") ? Number(canvasEl.getAttribute("width")) : (cssW || 120);
+      const H = canvasEl.getAttribute("height") ? Number(canvasEl.getAttribute("height")) : (cssH || 30);
+      // Re-set backing store dimensions for DPR if not already.
+      if (canvasEl._dprApplied !== dpr) {
+        canvasEl.width = W * dpr;
+        canvasEl.height = H * dpr;
+        canvasEl.style.width = W + "px";
+        canvasEl.style.height = H + "px";
+        canvasEl._dprApplied = dpr;
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+      const pts = Array.isArray(points) ? points : [];
+      if (pts.length < 2) {
+        // Show a faint baseline so the canvas isn't blank on first sample.
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.25;
+        ctx.beginPath();
+        ctx.moveTo(0, H - 1);
+        ctx.lineTo(W, H - 1);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        return;
+      }
+      const values = pts.map((p) => Number(p.v) || 0);
+      const max = Math.max(...values);
+      const min = Math.min(...values);
+      const span = max - min || 1;
+      const pad = 2;
+      const innerW = W - pad * 2;
+      const innerH = H - pad * 2;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.25;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      pts.forEach((p, i) => {
+        const x = pad + (i / (pts.length - 1)) * innerW;
+        const y = pad + innerH - ((Number(p.v) || 0) - min) / span * innerH;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      // Subtle fill under the line for affordance.
+      ctx.lineTo(pad + innerW, pad + innerH);
+      ctx.lineTo(pad, pad + innerH);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.12;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // Highlight the last point.
+      const last = pts[pts.length - 1];
+      const lx = pad + innerW;
+      const ly = pad + innerH - ((Number(last.v) || 0) - min) / span * innerH;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(lx, ly, 1.75, 0, Math.PI * 2);
+      ctx.fill();
+    },
+    /**
+     * Format the latest sample of a sparkline buffer. Returns "—" when there
+     * are no samples yet. Counter buffers (ticks/broadcasts/iterm) get a
+     * "/min" suffix derived from the 5s poll cadence (delta * 12). The
+     * tickMs buffer is rendered as "X.X ms".
+     */
+    sparklineLast(key) {
+      const buf = this.metricsHistory && this.metricsHistory[key];
+      if (!Array.isArray(buf) || buf.length === 0) return "—";
+      const v = Number(buf[buf.length - 1].v) || 0;
+      if (key === "tickMs") return `${v.toFixed(1)} ms`;
+      if (key === "ticks") return `${Math.round(v * 12)} t/min`;
+      if (key === "broadcasts") return `${Math.round(v * 12)} b/min`;
+      if (key === "iterm") return `${Math.round(v * 12)} r/min`;
+      return String(v);
     },
     onAdminLogsLineCountChange() {
       this.loadAdminLogs();

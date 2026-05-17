@@ -954,6 +954,47 @@
         </template>
       </section>
 
+      <!-- Section A1: Observability sparklines -->
+      <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 dark:bg-zinc-900/40 p-4">
+        <header class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-medium text-zinc-200 dark:text-zinc-200">Observability</h3>
+          <span class="text-[11px] text-zinc-500 dark:text-zinc-500">live · from <code>/api/metrics</code></span>
+        </header>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400">Scheduler ticks/min</div>
+            <canvas x-ref="sparkTicks" width="120" height="30"
+                    class="block mt-1"></canvas>
+            <div class="text-sm font-mono text-zinc-200 dark:text-zinc-200 mt-1"
+                 x-text="sparklineLast('ticks')"></div>
+          </div>
+          <div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400">Broadcasts/min</div>
+            <canvas x-ref="sparkBroadcasts" width="120" height="30"
+                    class="block mt-1"></canvas>
+            <div class="text-sm font-mono text-zinc-200 dark:text-zinc-200 mt-1"
+                 x-text="sparklineLast('broadcasts')"></div>
+          </div>
+          <div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400">Scheduler tick ms (max)</div>
+            <canvas x-ref="sparkTickMs" width="120" height="30"
+                    class="block mt-1"></canvas>
+            <div class="text-sm font-mono text-zinc-200 dark:text-zinc-200 mt-1"
+                 x-text="sparklineLast('tickMs')"></div>
+          </div>
+          <div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400">iTerm refresh/min</div>
+            <canvas x-ref="sparkIterm" width="120" height="30"
+                    class="block mt-1"></canvas>
+            <div class="text-sm font-mono text-zinc-200 dark:text-zinc-200 mt-1"
+                 x-text="sparklineLast('iterm')"></div>
+          </div>
+        </div>
+        <div class="text-xs text-zinc-500 dark:text-zinc-400 mt-3">
+          Last 5 minutes · updated every 5s
+        </div>
+      </section>
+
       <!-- Section A2: Performance metrics card -->
       <section class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
         <header class="flex items-center justify-between mb-3">
