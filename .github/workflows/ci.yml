@@ -62,3 +62,25 @@ jobs:
 
       - name: ruff format --check
         run: ruff format --check backend/ tests/
+
+  frontend-test:
+    name: vitest (frontend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+
+      - name: Run Vitest
+        run: npm test
