@@ -117,12 +117,33 @@ def find_logs_for_cwd(cwd: str, log_dir: Path | None = None) -> list[Path]:
     return files
 
 
+_FRACTIONAL_SECONDS_RE = re.compile(r"(\.\d+)(?=[+\-Z]|$)")
+
+
 def _parse_ts(s: str | None) -> datetime | None:
     if not s:
         return None
     try:
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
+        # Issue #155: Python 3.10's `datetime.fromisoformat` only accepts
+        # fractional seconds with exactly 3 or 6 digits — `.5+00:00` raises
+        # ValueError on 3.10 but parses fine on 3.11+. Normalize the
+        # fractional segment so the rest of the codebase doesn't silently
+        # drop log entries with non-millisecond/microsecond precision.
+        m = _FRACTIONAL_SECONDS_RE.search(s)
+        if m:
+            frac = m.group(1)  # includes the leading "."
+            digits = frac[1:]
+            n = len(digits)
+            if n < 3:
+                digits = digits.ljust(3, "0")
+            elif n < 6:
+                digits = digits.ljust(6, "0")
+            else:
+                digits = digits[:6]
+            if digits != frac[1:]:
+                s = s[: m.start()] + "." + digits + s[m.end() :]
         dt = datetime.fromisoformat(s)
     except ValueError:
         return None
