@@ -109,7 +109,7 @@ def _friendly(path: Path | str) -> str:
         return "~"
     prefix = home + os.sep
     if s.startswith(prefix):
-        return "~" + os.sep + s[len(prefix):]
+        return "~" + os.sep + s[len(prefix) :]
     return s
 
 
@@ -507,13 +507,35 @@ def check_http_health(
     )
 
 
+#: #152 — cap the response body read by ``_default_http_get`` at 64 KiB.
+#: The doctor only probes ``/api/health`` and ``/api/admin/status``, both of
+#: which return small JSON; a misbehaving daemon (or a future endpoint that
+#: accidentally streams an unbounded payload) must not be able to OOM the
+#: user's terminal. Matches the defensive posture of ``backend.api.admin``'s
+#: ``_MAX_LOG_READ_BYTES`` cap. Exposed as a module-level constant so tests
+#: can assert + tune without monkey-patching.
+_HTTP_BODY_MAX_BYTES: int = 64 * 1024
+
+
 def _default_http_get(url: str) -> tuple[int, dict]:
-    """Production-mode HTTP GET; returns ``(status_code, parsed_json_or_empty)``."""
+    """Production-mode HTTP GET; returns ``(status_code, parsed_json_or_empty)``.
+
+    Reads at most ``_HTTP_BODY_MAX_BYTES + 1`` bytes from the response — if
+    the body overruns the cap we treat it as malformed and return ``{}``.
+    The doctor only checks status codes, not body contents, so dropping an
+    unbounded body is the right defensive move.
+    """
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=2) as resp:
         status = resp.status
+        # Read one extra byte so we can tell "exactly cap" from "over cap".
+        raw = resp.read(_HTTP_BODY_MAX_BYTES + 1)
+        if len(raw) > _HTTP_BODY_MAX_BYTES:
+            # Oversized — bail out without parsing. Status code is still
+            # useful (caller only checks for 200), body is dropped.
+            return status, {}
         try:
-            body = json.loads(resp.read())
+            body = json.loads(raw) if raw else {}
             if not isinstance(body, dict):
                 body = {}
         except Exception:  # noqa: BLE001

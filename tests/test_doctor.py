@@ -296,6 +296,84 @@ def test_check_http_health_urlerror():
     assert r.status == "fail"
 
 
+# --- #152: _default_http_get body cap --------------------------------------
+
+
+def test_default_http_get_caps_body_read(monkeypatch):
+    """A malicious/runaway daemon returning a huge body must not OOM the doctor."""
+    cap = doctor._HTTP_BODY_MAX_BYTES
+    assert cap == 64 * 1024  # documented cap
+
+    # Forge a 1 MiB payload — way over the cap.
+    huge = b"x" * (1024 * 1024)
+
+    class FakeResp:
+        status = 200
+
+        def __init__(self) -> None:
+            self._buf = huge
+
+        def read(self, n: int = -1) -> bytes:
+            if n is None or n < 0:
+                data, self._buf = self._buf, b""
+                return data
+            data, self._buf = self._buf[:n], self._buf[n:]
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    captured: list[int | None] = []
+
+    real_resp = FakeResp()
+    # Wrap read so we can confirm the doctor never asks for more than cap+1.
+    original_read = real_resp.read
+
+    def spy_read(n: int = -1) -> bytes:
+        captured.append(n)
+        return original_read(n)
+
+    real_resp.read = spy_read  # type: ignore[method-assign]
+
+    monkeypatch.setattr(doctor.urllib.request, "urlopen", lambda req, timeout=2: real_resp)
+
+    status, body = doctor._default_http_get("http://127.0.0.1:7788/api/health")
+    assert status == 200
+    # Oversized body → dropped, returned empty.
+    assert body == {}
+    # The doctor must have requested at most cap+1 bytes — never the full payload.
+    assert captured, "expected at least one read() call"
+    assert all(
+        (n is not None and n <= cap + 1) for n in captured
+    ), f"doctor asked for too many bytes: {captured}"
+
+
+def test_default_http_get_parses_small_body(monkeypatch):
+    """Under the cap, the body is still parsed (status-quo behavior preserved)."""
+    payload = b'{"ok": true, "pid": 1234}'
+
+    class FakeResp:
+        status = 200
+
+        def read(self, n: int = -1) -> bytes:
+            return payload[:n] if n is not None and n >= 0 else payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(doctor.urllib.request, "urlopen", lambda req, timeout=2: FakeResp())
+
+    status, body = doctor._default_http_get("http://127.0.0.1:7788/api/admin/status")
+    assert status == 200
+    assert body == {"ok": True, "pid": 1234}
+
+
 # --- PID matches admin status ----------------------------------------------
 
 
