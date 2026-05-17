@@ -225,6 +225,31 @@ def test_check_pid_file_alive(tmp_path):
     assert str(os.getpid()) in r.detail
 
 
+def test_check_pid_file_handles_non_utf8_bytes(tmp_path):
+    """A binary/non-UTF-8 PID file used to crash with UnicodeDecodeError (#147)."""
+    paths = _make_paths(tmp_path, make_pid_file=False)
+    # Write arbitrary bytes that aren't valid UTF-8.
+    paths.pid_file.write_bytes(b"\xff\xfe\x00\x01\x80")
+    r = doctor.check_pid_file(paths)
+    # Decoded bytes will become non-numeric → warn (not raise).
+    assert r.status == "warn"
+    assert "non-numeric" in r.detail
+    assert r.hint is not None
+
+
+def test_check_pid_matches_admin_status_handles_non_utf8_bytes(tmp_path):
+    """PID-vs-admin check also survives a binary PID file (#147)."""
+    paths = _make_paths(tmp_path, make_pid_file=False)
+    paths.pid_file.write_bytes(b"\xff\xfe garbage")
+
+    def fake_get(url: str) -> tuple[int, dict]:
+        raise AssertionError("should not reach HTTP — PID parse fails first")
+
+    r = doctor.check_pid_matches_admin_status(paths, port=7788, http_get=fake_get)
+    assert r.status == "warn"
+    assert "unreadable" in r.detail.lower()
+
+
 # --- HTTP health check ------------------------------------------------------
 
 

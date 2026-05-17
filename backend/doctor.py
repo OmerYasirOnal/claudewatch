@@ -423,7 +423,12 @@ def check_pid_file(paths: DoctorPaths) -> CheckResult:
             detail="No PID file (daemon not running)",
         )
     try:
-        raw = paths.pid_file.read_text().strip()
+        # Read as bytes + decode defensively: a binary/non-UTF-8 PID file (e.g.
+        # corrupted write, accidental redirect) used to raise UnicodeDecodeError
+        # straight through `read_text()`, which is a ValueError subclass and so
+        # bypassed the OSError handler — `claudewatch doctor` then crashed with
+        # a traceback on the very situation the check exists to surface (#147).
+        raw = paths.pid_file.read_bytes().decode("ascii", errors="replace").strip()
     except OSError as e:
         return CheckResult(
             name="pid_file",
@@ -538,7 +543,11 @@ def check_pid_matches_admin_status(
             detail="Skipped (no PID file)",
         )
     try:
-        recorded = int(paths.pid_file.read_text().strip())
+        # Decode as bytes for the same #147 reason as check_pid_file — the
+        # (OSError, ValueError) tuple does NOT include UnicodeDecodeError
+        # against some Python versions if a custom codec is registered, so
+        # be explicit and force-decode replacements before int() parsing.
+        recorded = int(paths.pid_file.read_bytes().decode("ascii", errors="replace").strip())
     except (OSError, ValueError):
         return CheckResult(
             name="pid_matches_admin_status",
