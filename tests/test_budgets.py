@@ -97,8 +97,11 @@ async def state(tmp_path):
 async def fresh_app_state(state):
     """A baseline AppState with budgets enabled and the DB attached."""
     s = AppState(config=_budgets_cfg(), state=state)
-    # last_budget_check_at = 0.0 → first call always runs.
-    s.last_budget_check_at = 0.0
+    # Sentinel that guarantees the rate-limit guard
+    # `(time.monotonic() - last_budget_check_at) < 60` passes regardless of
+    # how recently the test runner booted. Setting to 0.0 was racy on cold
+    # CI workers where monotonic() < 60s (Py3.10 runner repro'd this).
+    s.last_budget_check_at = -1_000_000.0
     return s
 
 
