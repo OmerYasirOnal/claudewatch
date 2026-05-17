@@ -43,6 +43,71 @@ jobs:
         working-directory: mac
         run: make dmg
 
+      # ---------------------------------------------------------------
+      # Apple codesigning + notarization (secrets-gated).
+      #
+      # The next two steps only execute when the maintainer has added the
+      # full set of Apple secrets to the repo. If any secret is missing
+      # the steps are skipped and we still ship an unsigned DMG — users
+      # will see a Gatekeeper warning but the release won't break.
+      #
+      # Required repo secrets (add via `gh secret set`):
+      #   DEVELOPER_ID_APP_CERT           — base64 of the .p12 export
+      #   DEVELOPER_ID_APP_CERT_PASSWORD  — the .p12 export password
+      #   APPLE_ID_EMAIL                  — Apple ID for notarytool
+      #   APPLE_ID_PASSWORD               — app-specific password
+      #   APPLE_TEAM_ID                   — 10-char team ID
+      #
+      # Step-by-step setup is in mac/docs/code-signing.md.
+      # ---------------------------------------------------------------
+      - name: Import code-signing certificate
+        if: ${{ secrets.DEVELOPER_ID_APP_CERT != '' }}
+        env:
+          DEVELOPER_ID_APP_CERT: ${{ secrets.DEVELOPER_ID_APP_CERT }}
+          DEVELOPER_ID_APP_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_APP_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Decode the base64 P12 to a temp file; never echo its contents.
+          CERT_PATH="$RUNNER_TEMP/dev_id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD="$(uuidgen)"   # ephemeral; lives only for this job
+          echo "$DEVELOPER_ID_APP_CERT" | base64 --decode > "$CERT_PATH"
+          # Create a dedicated keychain so we don't touch the runner's login chain.
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Make it searchable + the default so codesign picks it up.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed s/\"//g)
+          security default-keychain -s "$KEYCHAIN_PATH"
+          # Import the cert + private key, marking codesign as an allowed tool.
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_APP_CERT_PASSWORD" -T /usr/bin/codesign
+          # Required since macOS 10.12 — lets codesign use the key without UI prompt.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          # Extract the cert's SHA-1 so the next step has a stable identifier.
+          CERT_ID=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -1 | awk '{print $2}')
+          if [ -z "$CERT_ID" ]; then
+            echo "::error::Failed to find Developer ID Application cert after import"
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+            exit 1
+          fi
+          echo "DEVELOPER_ID_APP_CERT_ID=$CERT_ID" >> "$GITHUB_ENV"
+          # Wipe the decoded P12 immediately — the keychain has it now.
+          rm -f "$CERT_PATH"
+          echo "::add-mask::$CERT_ID"
+          echo "Imported cert (SHA-1 masked in logs)."
+
+      - name: Sign + notarize the DMG
+        if: ${{ env.DEVELOPER_ID_APP_CERT_ID != '' }}
+        working-directory: mac
+        env:
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: make sign-notarize
+
       - name: Generate SHA256 checksum
         working-directory: mac
         run: shasum -a 256 dist/ClaudeWatch.dmg > dist/ClaudeWatch.dmg.sha256
@@ -79,6 +144,20 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
+      # Compute a "signed: yes/no" string for the release body. The workflow
+      # stays green either way; we just want the release notes to be honest
+      # about whether Gatekeeper will pass on a clean Mac.
+      - name: Compute signing status
+        id: signed
+        run: |
+          if [ -n "${{ env.DEVELOPER_ID_APP_CERT_ID }}" ]; then
+            echo "status=signed" >> "$GITHUB_OUTPUT"
+            echo "note=Signed + notarized by Apple. Should launch without Gatekeeper prompts." >> "$GITHUB_OUTPUT"
+          else
+            echo "status=unsigned" >> "$GITHUB_OUTPUT"
+            echo "note=**Unsigned build.** Gatekeeper will warn on first launch — right-click → Open → confirm. (See \`mac/docs/code-signing.md\`.)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -92,8 +171,7 @@ jobs:
             **Install**: download `ClaudeWatch.dmg`, mount, drag to `/Applications`, double-click.
             Verify checksum: `shasum -a 256 ClaudeWatch.dmg | diff - ClaudeWatch.dmg.sha256`
 
-            **Note**: unsigned build. Gatekeeper will warn on first launch — right-click → Open → confirm.
-            (Code-signed releases coming after Apple Developer cert enrollment; see `mac/docs/code-signing.md`.)
+            **Signing status**: ${{ steps.signed.outputs.status }} — ${{ steps.signed.outputs.note }}
 
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/commits/v${{ steps.ver.outputs.version }}) for changes.
           files: |

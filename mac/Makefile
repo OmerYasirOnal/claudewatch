@@ -1,4 +1,4 @@
-.PHONY: all build app app-universal run install clean test python backend tray frontend dmg icon
+.PHONY: all build app app-universal run install clean test python backend tray frontend dmg icon sign sign-local sign-notarize release-signed
 .DEFAULT_GOAL := app
 
 APP_NAME     := ClaudeWatch
@@ -124,6 +124,20 @@ sign: dmg
 ## sign-local — sign without uploading to Apple notary service (testing only).
 sign-local: dmg
 	SKIP_NOTARIZE=1 ./scripts/sign-and-notarize.sh
+
+## sign-notarize — explicit signing pipeline target used by CI. Builds the .app
+## and DMG first, then drives sign-and-notarize.sh with the canonical paths.
+## Identical to `sign` today but kept as a named target so the workflow file
+## and the Makefile can evolve independently without breaking callers.
+sign-notarize: app dmg
+	./scripts/sign-and-notarize.sh dist/$(APP_NAME).app dist/$(APP_NAME).dmg
+
+## release-signed — full from-clean release pipeline. Wipes prior artifacts,
+## rebuilds the .app + DMG, then signs + notarizes + staples. This is what
+## you run on a release machine when you want a single command to produce a
+## ready-to-ship DMG.
+release-signed: clean app dmg sign-notarize
+	@echo "✓ Release-ready signed + notarized DMG: dist/$(APP_NAME).dmg"
 
 ## test — Swift package tests (separate from the Python pytest suite at repo root).
 test:
