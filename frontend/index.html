@@ -479,6 +479,17 @@
         </template>
       </section>
 
+      <section x-show="showForecastCard()" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4" data-testid="hourly-cost-card">
+        <div class="flex items-baseline justify-between gap-3 mb-2">
+          <h3 class="text-sm font-medium text-zinc-300">Hourly cost trend (last 7d)</h3>
+          <span class="text-[11px] text-zinc-500" x-text="hourlyCostSummary() || 'Loading…'"></span>
+        </div>
+        <canvas id="hourly-cost-bar" class="w-full" style="height: 200px;"></canvas>
+        <template x-if="hourlyCostError">
+          <div class="mt-2 text-xs text-rose-400" x-text="hourlyCostError"></div>
+        </template>
+      </section>
+
       <section x-show="showCost()" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
         <h3 class="text-sm font-medium mb-3 text-zinc-300">24h cost trend</h3>
         <canvas id="insights-bar" class="w-full" style="height: 180px;"></canvas>

@@ -121,6 +121,24 @@ async def hourly_history(
     return {"bins": bins}
 
 
+@router.get("/history/hourly-cost")
+async def hourly_cost(
+    request: Request,
+    hours: int = Query(168, ge=1, le=720),
+) -> dict:
+    """Per-hour cost trend over the trailing ``hours`` window (default 7 days).
+
+    Returns a continuous time axis — empty hours appear as zero-cost bins so
+    the frontend can render a stable x-axis without gap handling.
+    """
+    s = _state(request)
+    if s.state is None:
+        return {"hours": hours, "bins": [], "total_cost_usd": 0.0}
+    bins = await s.state.hourly_cost(hours=hours)
+    total = round(sum(float(b.get("cost_usd") or 0.0) for b in bins), 6)
+    return {"hours": hours, "bins": bins, "total_cost_usd": total}
+
+
 @router.get("/sessions/{pid}/export")
 async def export_session(pid: int, request: Request):
     """Download the full active-session snapshot as a JSON attachment."""
