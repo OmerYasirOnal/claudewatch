@@ -30,6 +30,27 @@ def test_safe_as_handles_empty_string():
     assert _safe_as("") == ""
 
 
+def test_safe_as_strips_newlines():
+    # #95: a raw newline would terminate the AppleScript string literal,
+    # making the surrounding `display notification "..."` call a syntax
+    # error and silently dropping the notification.
+    assert "\n" not in _safe_as("first line\nsecond line")
+    assert "\r" not in _safe_as("with carriage\rreturn")
+
+
+def test_safe_as_strips_other_control_chars():
+    # Tabs, NULs, ESC sequences — anything < 0x20 (and not a literal space)
+    # must be normalized.
+    result = _safe_as("tab\there and bell\x07")
+    assert "\t" not in result
+    assert "\x07" not in result
+
+
+def test_safe_as_keeps_printable_ascii_and_space():
+    # Sanity: don't over-zealously rewrite normal characters.
+    assert _safe_as("hello world 123 ()-_/") == "hello world 123 ()-_/"
+
+
 async def test_notify_runs_osascript(monkeypatch):
     """notify() should shell out to osascript with a script that contains the title."""
     calls: list[tuple] = []

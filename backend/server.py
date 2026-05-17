@@ -304,14 +304,49 @@ async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
     `session.started` and `session.ended` always fire. `session.updated` only
     fires when the session's serialized form has changed since the last
     broadcast (tracked via SHA-256 hash in `s.session_hashes`).
+
+    #93: identity is keyed on ``(pid, started_at)`` rather than ``pid`` alone.
+    The OS recycles PIDs aggressively; if a claude process exits and another
+    claude is spawned and reassigned the same PID before the next 2s tick,
+    a pid-only diff would treat it as a quiet "update" — leaking
+    ``notified_high_cost_pids`` and leaving the old SQLite row open forever.
+    The public state (``s.sessions``) stays pid-keyed for callers; only the
+    identity-tracking inside this function uses the composite key.
     """
     prev = s.sessions
     new_map = {x.pid: x for x in new_sessions}
+    prev_keyed = {(p.pid, p.started_at.isoformat()): p for p in prev.values()}
+    new_keyed = {(x.pid, x.started_at.isoformat()): x for x in new_sessions}
     notif_cfg = s.config.get("notifications", {}) or {}
     notif_enabled = bool(notif_cfg.get("enabled"))
 
-    for pid, sess in new_map.items():
-        if pid not in prev:
+    # Process "ended" first so a pid-reuse case (old session ended, new
+    # session spawned with the same pid in the same tick) clears the per-pid
+    # bookkeeping before the started branch re-populates it for the new
+    # session. Otherwise the pop in the ended branch would wipe out the
+    # freshly-recorded started_at / hash for the new session.
+    for key, ended_sess in prev_keyed.items():
+        if key in new_keyed:
+            continue
+        pid = ended_sess.pid
+        await s.broadcast({"event": "session.ended", "pid": pid})
+        s.session_hashes.pop(pid, None)
+        if s.state:
+            started = s.sessions_started_at.pop(pid, ended_sess.started_at)
+            await s.state.mark_ended(pid, started)
+        if notif_enabled and notif_cfg.get("on_session_end"):
+            # Sniff the conversation log for a short preview of what the
+            # assistant last said. Falls back to message/token counts when
+            # the log isn't readable or contains no text blocks.
+            log_path = Path(ended_sess.conversation_log_path) if ended_sess.conversation_log_path else None
+            asyncio.create_task(
+                _notify_session_end(ended_sess, log_path),
+            )
+        s.notified_high_cost_pids.discard(pid)
+
+    for key, sess in new_keyed.items():
+        pid = sess.pid
+        if key not in prev_keyed:
             await s.broadcast({"event": "session.started", "session": sess.model_dump(mode="json")})
             s.sessions_started_at[pid] = sess.started_at
             s.session_hashes[pid] = _session_hash(sess)
@@ -348,26 +383,6 @@ async def _emit_diffs(s: AppState, new_sessions: list[ClaudeSession]) -> None:
                     )
                 )
                 s.notified_high_cost_pids.add(pid)
-
-    for pid in list(prev.keys()):
-        if pid not in new_map:
-            await s.broadcast({"event": "session.ended", "pid": pid})
-            s.session_hashes.pop(pid, None)
-            if s.state:
-                started = s.sessions_started_at.pop(pid, prev[pid].started_at)
-                await s.state.mark_ended(pid, started)
-            if notif_enabled and notif_cfg.get("on_session_end"):
-                ended_sess = prev[pid]
-                # Sniff the conversation log for a short preview of what the
-                # assistant last said. Falls back to message/token counts when
-                # the log isn't readable or contains no text blocks.
-                log_path = (
-                    Path(ended_sess.conversation_log_path) if ended_sess.conversation_log_path else None
-                )
-                asyncio.create_task(
-                    _notify_session_end(ended_sess, log_path),
-                )
-            s.notified_high_cost_pids.discard(pid)
 
     s.sessions = new_map
 

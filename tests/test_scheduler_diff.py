@@ -87,6 +87,50 @@ async def test_session_ended_fires_when_pid_disappears():
     assert 1 not in s.session_hashes
 
 
+async def test_pid_reuse_emits_ended_and_started_in_same_tick():
+    """#93: when a session ends and a new claude is spawned with the same
+    PID before the next tick, the diff must surface session.ended for the
+    old one AND session.started for the new one (identity is composite
+    ``(pid, started_at)``)."""
+    s = AppState(config=dict(DEFAULT_CONFIG))
+    events = _collect_events(s)
+
+    old = _mk_sess(pid=1)
+    old.started_at = datetime(2026, 5, 12, 10, 0, 0, tzinfo=timezone.utc)
+    await _emit_diffs(s, [old])
+    events.clear()
+
+    new = _mk_sess(pid=1)
+    new.started_at = datetime(2026, 5, 12, 11, 0, 0, tzinfo=timezone.utc)
+    await _emit_diffs(s, [new])
+
+    kinds = [e["event"] for e in events]
+    assert "session.ended" in kinds
+    assert "session.started" in kinds
+    # The hash for the new session must be tracked (and not wiped by the
+    # ended branch popping the pid-keyed entry).
+    assert 1 in s.session_hashes
+
+
+async def test_pid_reuse_clears_notified_high_cost_for_new_session():
+    """#93: notified_high_cost_pids is pid-keyed; PID reuse must reset it
+    so the new session gets its own cost notification when crossing the
+    threshold."""
+    s = AppState(config=dict(DEFAULT_CONFIG))
+    _collect_events(s)
+
+    old = _mk_sess(pid=1)
+    old.started_at = datetime(2026, 5, 12, 10, 0, 0, tzinfo=timezone.utc)
+    s.notified_high_cost_pids.add(1)
+    await _emit_diffs(s, [old])
+
+    new = _mk_sess(pid=1)
+    new.started_at = datetime(2026, 5, 12, 11, 0, 0, tzinfo=timezone.utc)
+    await _emit_diffs(s, [new])
+
+    assert 1 not in s.notified_high_cost_pids
+
+
 async def test_session_hash_evicted_on_end_so_re_start_emits_started():
     s = AppState(config=dict(DEFAULT_CONFIG))
     events = _collect_events(s)

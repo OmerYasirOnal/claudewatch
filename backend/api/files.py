@@ -24,6 +24,7 @@ allow-list character class — see ``EditorConfig`` in ``config_api.py``.
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import re
 import subprocess
@@ -120,11 +121,17 @@ async def all_file_changes(
         # what we need but ruff would flag the unused name otherwise.
         del dq
 
-    items = list(latest.values())
-    items.sort(key=lambda x: x["_ts_obj"], reverse=True)
-    for item in items:
+    # #90: avoid building a fully-sorted N-item list when we only ever return
+    # _MAX_FILE_CHANGES. With ~10 active cwds during an `npm install` storm the
+    # input is ~20k entries; heapq.nlargest keeps the cost at O(N log 500).
+    top = heapq.nlargest(
+        _MAX_FILE_CHANGES,
+        latest.values(),
+        key=lambda x: x["_ts_obj"],
+    )
+    for item in top:
         item.pop("_ts_obj", None)
-    return items[:_MAX_FILE_CHANGES]
+    return top
 
 
 # ---------------------------------------------------------------------------
@@ -179,20 +186,32 @@ def _resolve_safe_paths(s, cwd: str, path: str) -> tuple[Path, Path]:
     return cwd_path, candidate
 
 
-def _git_diff_blocking(
+def _run_git(args: list[str]) -> subprocess.CompletedProcess:
+    """Helper for asyncio.to_thread — runs a single git invocation."""
+    return subprocess.run(args, capture_output=True, timeout=_DIFF_TIMEOUT_SECONDS)
+
+
+async def _git_diff(
     cwd_path: Path,
     rel_path: str,
     context: int,
 ) -> dict[str, Any]:
-    """Run git diff / diff --stat / ls-files for ``rel_path`` under ``cwd_path``.
+    """Run git ls-files / diff / diff --stat for ``rel_path`` concurrently.
 
-    Designed for ``asyncio.to_thread`` — does subprocess + file IO. Never
-    raises; returns a dict with the same shape the endpoint serialises.
+    #96: the three git invocations used to run serially, so the worst-case
+    wall time was ``3 * _DIFF_TIMEOUT_SECONDS`` (~15s). Running them via
+    ``asyncio.gather(... asyncio.to_thread(...) ...)`` bounds the wall time
+    to ~``_DIFF_TIMEOUT_SECONDS`` (~5s) — they all share the same budget and
+    finish together.
+
+    Returns a dict matching the endpoint's serialised shape. Never raises
+    except for ``subprocess.TimeoutExpired`` which the endpoint maps to a
+    504.
     """
     git_dir = cwd_path / ".git"
     if not git_dir.exists():
         # Not a git checkout — fall back to a plain content preview.
-        preview = _read_file_preview(cwd_path / rel_path)
+        preview = await asyncio.to_thread(_read_file_preview, cwd_path / rel_path)
         return {
             "is_git": False,
             "tracked": False,
@@ -201,18 +220,24 @@ def _git_diff_blocking(
             "untracked_preview": preview,
         }
 
-    # Tracked check first — controls whether we run `git diff` or just preview.
-    tracked = (
-        subprocess.run(
-            ["git", "-C", str(cwd_path), "ls-files", "--error-unmatch", "--", rel_path],
-            capture_output=True,
-            timeout=_DIFF_TIMEOUT_SECONDS,
-        ).returncode
-        == 0
+    # Fan out all three git calls at once. `ls-files --error-unmatch` tells
+    # us whether the file is tracked; diff / diff --stat are only meaningful
+    # if it is. We run them speculatively in parallel — if the file turns out
+    # to be untracked we just discard the diff/stat results. The wasted work
+    # is bounded by `_DIFF_TIMEOUT_SECONDS` and saves us a serial round-trip
+    # in the (much more common) tracked-file case.
+    ls_args = ["git", "-C", str(cwd_path), "ls-files", "--error-unmatch", "--", rel_path]
+    diff_args = ["git", "-C", str(cwd_path), "diff", f"-U{int(context)}", "--", rel_path]
+    stat_args = ["git", "-C", str(cwd_path), "diff", "--stat", "--", rel_path]
+    ls_proc, diff_proc, stat_proc = await asyncio.gather(
+        asyncio.to_thread(_run_git, ls_args),
+        asyncio.to_thread(_run_git, diff_args),
+        asyncio.to_thread(_run_git, stat_args),
     )
+    tracked = ls_proc.returncode == 0
 
     if not tracked:
-        preview = _read_file_preview(cwd_path / rel_path)
+        preview = await asyncio.to_thread(_read_file_preview, cwd_path / rel_path)
         return {
             "is_git": True,
             "tracked": False,
@@ -221,16 +246,6 @@ def _git_diff_blocking(
             "untracked_preview": preview,
         }
 
-    diff_proc = subprocess.run(
-        ["git", "-C", str(cwd_path), "diff", f"-U{int(context)}", "--", rel_path],
-        capture_output=True,
-        timeout=_DIFF_TIMEOUT_SECONDS,
-    )
-    stat_proc = subprocess.run(
-        ["git", "-C", str(cwd_path), "diff", "--stat", "--", rel_path],
-        capture_output=True,
-        timeout=_DIFF_TIMEOUT_SECONDS,
-    )
     return {
         "is_git": True,
         "tracked": True,
@@ -273,7 +288,7 @@ async def file_diff(
     rel_path = str(abs_path.relative_to(cwd_path))
 
     try:
-        result = await asyncio.to_thread(_git_diff_blocking, cwd_path, rel_path, context)
+        result = await _git_diff(cwd_path, rel_path, context)
     except subprocess.TimeoutExpired as e:
         raise HTTPException(504, "git diff timed out") from e
     except Exception as e:  # noqa: BLE001
