@@ -313,4 +313,23 @@ async def test_hourly_cost_no_plan_defaults_to_api(tmp_path):
         assert data["total_cost_usd"] == pytest.approx(0.50)
     finally:
         client.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# #143: plan gate must be case-insensitive.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("plan_value", ["API", "Api", "ApI", "  api  "])
+async def test_hourly_cost_plan_case_insensitive_returns_real_cost(tmp_path, plan_value):
+    """Mixed-case ``plan`` values must be treated as 'api' (real cost shown)."""
+    client, state = await _seeded_app_with_plan(tmp_path, plan=plan_value)
+    try:
+        r = client.get("/api/history/hourly-cost?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total_cost_usd"] == pytest.approx(0.50)
+        assert any(b["cost_usd"] > 0 for b in data["bins"])
+    finally:
+        client.__exit__(None, None, None)
         await state.close()

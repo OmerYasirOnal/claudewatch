@@ -12,12 +12,16 @@ return zeroed-out windows (same shape so the UI degrades cleanly).
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api")
+
+log = logging.getLogger(__name__)
 
 
 class BudgetWindow(BaseModel):
@@ -79,7 +83,10 @@ async def budgets(request: Request) -> BudgetsResponse:
     """Return current spend vs. configured cap for each budget window."""
     s = _state(request)
     cfg = (s.config or {}).get("budgets", {}) or {}
-    plan = (s.config or {}).get("plan", "api")
+    # #143: lowercase on read so hand-edited config.toml entries like
+    # ``plan = "API"`` (which bypass the Pydantic Literal validator) don't
+    # silently zero out cost data.
+    plan = str((s.config or {}).get("plan", "api") or "api").strip().lower()
     if plan != "api" or s.state is None or s.state._conn is None:
         return _empty_response(cfg)
 
@@ -88,13 +95,32 @@ async def budgets(request: Request) -> BudgetsResponse:
     except (TypeError, ValueError):
         warn = 80.0
 
+    # #146: fire all three cost_in_window queries concurrently — they're
+    # independent reads against the same aiosqlite connection and serializing
+    # them just adds wall-clock latency per poll (the 720h scan in particular
+    # is non-trivial on a populated DB). aiosqlite's executor pool handles
+    # the parallelism via its internal queue.
+    # #149: ``return_exceptions=True`` gives per-window error isolation — a
+    # single failing query downgrades that window to 0 instead of 500ing the
+    # entire widget, mirroring the scheduler's per-window try/except.
+    spent_results = await asyncio.gather(
+        *(s.state.cost_in_window(hours) for _, _, hours in _WINDOWS),
+        return_exceptions=True,
+    )
+
     windows: list[BudgetWindow] = []
-    for name, key, hours in _WINDOWS:
+    for (name, key, hours), spent_or_err in zip(_WINDOWS, spent_results, strict=True):
         try:
             budget = float(cfg.get(key, 0) or 0)
         except (TypeError, ValueError):
             budget = 0.0
-        spent = await s.state.cost_in_window(hours)
+        if isinstance(spent_or_err, BaseException):
+            # #149: a transient DB hiccup on one window must not take down the
+            # widget. Log + zero out that window so the others still render.
+            log.warning("budgets: cost_in_window(%d) failed: %s", hours, spent_or_err)
+            spent = 0.0
+        else:
+            spent = float(spent_or_err)
         pct = (spent / budget * 100.0) if budget > 0 else 0.0
         windows.append(
             BudgetWindow(

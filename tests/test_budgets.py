@@ -431,3 +431,214 @@ async def test_budgets_endpoint_zeroes_out_on_non_api_plan(api_app):
     for w in data["windows"]:
         assert w["spent_usd"] == 0.0
         assert w["percent"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# #143: plan gate must be case-insensitive in /api/budgets too.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("plan_value", ["API", "Api", "ApI", "  api  "])
+async def test_budgets_endpoint_plan_case_insensitive(api_app, plan_value):
+    """Mixed-case ``plan`` values must be treated as 'api' (real cost shown)."""
+    client, app, st = api_app
+    app.state.s.config["plan"] = plan_value
+    now = datetime.now(timezone.utc)
+    await _insert_ended(
+        st, pid=1, started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), cost=2.50
+    )
+    r = client.get("/api/budgets")
+    assert r.status_code == 200
+    data = r.json()
+    daily = next(w for w in data["windows"] if w["window"] == "daily")
+    assert daily["spent_usd"] == pytest.approx(2.50)
+    assert daily["percent"] == pytest.approx(50.0)
+
+
+# ---------------------------------------------------------------------------
+# #145: _maybe_check_budgets must not advance the rate-limit clock when the
+# gates (budgets disabled, non-api plan, notifications muted, no DB) fire.
+# Otherwise the user who just enabled budgets has to wait up to 60s for the
+# next evaluation.
+# ---------------------------------------------------------------------------
+
+
+async def test_maybe_check_budgets_does_not_advance_clock_when_disabled(monkeypatch, state):
+    """Two quick calls with budgets disabled must NOT update last_budget_check_at."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+    cfg = _budgets_cfg()
+    cfg["budgets"]["enabled"] = False
+    s = AppState(config=cfg, state=state)
+    s.last_budget_check_at = -1_000_000.0
+    sentinel = s.last_budget_check_at
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at == sentinel, "clock advanced even though budgets are disabled"
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at == sentinel, "clock advanced on 2nd call with budgets disabled"
+    assert mock_notify.await_count == 0
+
+
+async def test_maybe_check_budgets_does_not_advance_clock_when_non_api_plan(monkeypatch, state):
+    """Non-api plan must short-circuit BEFORE the rate-limit clock update."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+    cfg = _budgets_cfg()
+    cfg["plan"] = "max"
+    s = AppState(config=cfg, state=state)
+    s.last_budget_check_at = -1_000_000.0
+    sentinel = s.last_budget_check_at
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at == sentinel
+    assert mock_notify.await_count == 0
+
+
+async def test_maybe_check_budgets_does_not_advance_clock_when_notifications_muted(monkeypatch, state):
+    """Globally muted notifications must short-circuit BEFORE the clock update."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+    cfg = _budgets_cfg()
+    cfg["notifications"]["enabled"] = False
+    s = AppState(config=cfg, state=state)
+    s.last_budget_check_at = -1_000_000.0
+    sentinel = s.last_budget_check_at
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at == sentinel
+    assert mock_notify.await_count == 0
+
+
+async def test_maybe_check_budgets_advances_clock_when_work_runs(monkeypatch, state):
+    """Sanity-check: when all gates pass, the clock IS advanced (cooldown active)."""
+    mock_notify = AsyncMock()
+    monkeypatch.setattr("backend.server.notify", mock_notify)
+    s = AppState(config=_budgets_cfg(), state=state)
+    s.last_budget_check_at = -1_000_000.0
+    sentinel = s.last_budget_check_at
+
+    await _maybe_check_budgets(s)
+    assert s.last_budget_check_at != sentinel, "clock should advance when gates pass"
+
+
+# ---------------------------------------------------------------------------
+# #146: /api/budgets must run the three cost_in_window calls concurrently via
+# asyncio.gather, not serially.
+# ---------------------------------------------------------------------------
+
+
+async def test_budgets_endpoint_uses_gather_for_concurrency(api_app, monkeypatch):
+    """All three cost_in_window calls should be scheduled concurrently.
+
+    We assert this indirectly by tracking how many calls were in-flight at
+    once: with a serial `await` chain, every call resolves before the next
+    one starts (max concurrency = 1). With `asyncio.gather`, all three are
+    pending at once (max concurrency = 3).
+    """
+    import asyncio as _aio
+
+    client, app, st = api_app
+    in_flight = 0
+    max_in_flight = 0
+    call_lock = _aio.Lock()
+
+    async def tracked_cost_in_window(hours):
+        nonlocal in_flight, max_in_flight
+        async with call_lock:
+            in_flight += 1
+            if in_flight > max_in_flight:
+                max_in_flight = in_flight
+        # Yield enough so the other gather()-scheduled calls have a chance to
+        # enter this function before any returns.
+        await _aio.sleep(0.01)
+        async with call_lock:
+            in_flight -= 1
+        return 1.0 + hours  # any non-zero number — the response is just shape-checked
+
+    app.state.s.state.cost_in_window = tracked_cost_in_window
+
+    r = client.get("/api/budgets")
+    assert r.status_code == 200
+    data = r.json()
+    # 3 windows × non-zero spend → all 3 should report the mocked spend.
+    spend_values = sorted(w["spent_usd"] for w in data["windows"])
+    assert spend_values == sorted([1.0 + 24, 1.0 + 168, 1.0 + 720])
+    assert max_in_flight >= 2, f"expected concurrent cost_in_window calls, max_in_flight={max_in_flight}"
+
+
+async def test_budgets_endpoint_payload_unchanged_after_gather(api_app):
+    """Regression: refactor to asyncio.gather must not alter the JSON shape."""
+    client, _, st = api_app
+    now = datetime.now(timezone.utc)
+    await _insert_ended(
+        st, pid=1, started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), cost=2.50
+    )
+    r = client.get("/api/budgets")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enabled"] is True
+    assert data["warn_at_percent"] == 80.0
+    assert [w["window"] for w in data["windows"]] == ["daily", "weekly", "monthly"]
+    assert [w["hours"] for w in data["windows"]] == [24, 168, 720]
+    daily = next(w for w in data["windows"] if w["window"] == "daily")
+    assert daily["spent_usd"] == pytest.approx(2.50)
+    assert daily["budget_usd"] == pytest.approx(5.00)
+    assert daily["percent"] == pytest.approx(50.0)
+
+
+# ---------------------------------------------------------------------------
+# #148: state.cost_in_window — empty DB returns 0.0 via COALESCE, not via a
+# dead `if not rows` branch. Lock in #148's removal of the dead branch.
+# ---------------------------------------------------------------------------
+
+
+async def test_cost_in_window_empty_db_returns_zero_via_coalesce(state):
+    """COALESCE(SUM(...), 0) returns one row with cost=0 on empty input.
+
+    Locks in #148's removal of the dead `if not rows` branch — the function
+    must still return 0.0 cleanly when the sessions table is empty.
+    """
+    # Sanity: no rows inserted.
+    rows = await state._conn.execute_fetchall("SELECT COUNT(*) AS n FROM sessions")
+    assert dict(rows[0])["n"] == 0
+    assert await state.cost_in_window(24) == 0.0
+    assert await state.cost_in_window(720) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# #149: /api/budgets must survive a per-window DB error by zeroing out the
+# failing window only — the other windows must still render normally.
+# ---------------------------------------------------------------------------
+
+
+async def test_budgets_endpoint_isolates_per_window_db_error(api_app, monkeypatch):
+    """A failing window must NOT 500 the endpoint — it should zero out and
+    the other windows must still return."""
+    client, app, st = api_app
+
+    real_cost = app.state.s.state.cost_in_window
+
+    async def flaky_cost_in_window(hours):
+        if hours == 168:
+            raise RuntimeError("simulated DB error on weekly window")
+        return await real_cost(hours)
+
+    app.state.s.state.cost_in_window = flaky_cost_in_window
+
+    now = datetime.now(timezone.utc)
+    await _insert_ended(
+        st, pid=1, started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), cost=2.50
+    )
+
+    r = client.get("/api/budgets")
+    assert r.status_code == 200, f"endpoint should not 500 on a per-window failure; got {r.status_code}"
+    data = r.json()
+    by_name = {w["window"]: w for w in data["windows"]}
+    # Failed window zeroed out.
+    assert by_name["weekly"]["spent_usd"] == 0.0
+    assert by_name["weekly"]["percent"] == 0.0
+    # Other windows still computed normally.
+    assert by_name["daily"]["spent_usd"] == pytest.approx(2.50)
+    assert by_name["monthly"]["spent_usd"] == pytest.approx(2.50)
