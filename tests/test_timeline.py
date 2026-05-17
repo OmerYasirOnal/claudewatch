@@ -297,7 +297,7 @@ def test_background_subagent_completes_via_task_notification(tmp_path):
             _tool_result(
                 "2026-05-17T10:00:01.5Z",
                 "ag2",
-                "Async agent launched successfully. · agentId: XYZ (internal id n)",
+                "Async agent launched successfully. agentId: XYZ (internal id n)",
             ),
             {
                 "type": "user",
