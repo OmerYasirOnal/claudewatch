@@ -237,3 +237,78 @@ async def test_forecast_custom_window_hours(app):
     assert data["observed_cost_usd"] == pytest.approx(10.0)
     assert data["hourly_rate_usd"] == pytest.approx(10.0)
     assert data["projection_24h_usd"] == pytest.approx(240.0)
+
+
+async def test_forecast_clamps_negative_cost_rows(app):
+    """Issue #125: a corrupted row with cost_estimate < 0 must NOT drag the
+    observed cost or any projection field below zero. The SQL CASE clause
+    drops negative rows to 0 before summation."""
+    client, _, state = app
+    now = datetime.now(timezone.utc)
+    # One legitimate positive-cost session.
+    await _insert_ended(
+        state,
+        pid=1,
+        started_at=now - timedelta(hours=2),
+        ended_at=now - timedelta(hours=1),
+        cost=1.0,
+    )
+    # Two pathological rows: a "refund" entry and a glitch entry that would,
+    # without the clamp, drive the observed total negative.
+    await _insert_ended(
+        state,
+        pid=2,
+        started_at=now - timedelta(hours=5),
+        ended_at=now - timedelta(hours=4),
+        cost=-99.0,
+    )
+    await _insert_ended(
+        state,
+        pid=3,
+        started_at=now - timedelta(hours=10),
+        ended_at=now - timedelta(hours=9),
+        cost=-0.5,
+    )
+
+    r = client.get("/api/forecast?window_hours=24")
+    assert r.status_code == 200
+    data = r.json()
+
+    # observed_cost_usd is the SUM of clamped costs — only the +1.0 row
+    # contributes, so the answer is exactly 1.0 regardless of the negatives.
+    assert data["observed_cost_usd"] == pytest.approx(1.0)
+    # All three rows are still counted in observed_session_count (we only
+    # clamp the cost, not the row).
+    assert data["observed_session_count"] == 3
+    # Every derived field must be >= 0.
+    assert data["hourly_rate_usd"] >= 0.0
+    assert data["projection_24h_usd"] >= 0.0
+    assert data["projection_7d_usd"] >= 0.0
+    assert data["projection_30d_usd"] >= 0.0
+
+
+async def test_forecast_all_negative_costs_collapse_to_zero(app):
+    """If EVERY row in the window has cost < 0, the response should be all
+    zeros — not negative — and the endpoint should not crash on the
+    division."""
+    client, _, state = app
+    now = datetime.now(timezone.utc)
+    for pid, cost in [(10, -1.0), (11, -2.5), (12, -0.01)]:
+        await _insert_ended(
+            state,
+            pid=pid,
+            started_at=now - timedelta(hours=3),
+            ended_at=now - timedelta(hours=1),
+            cost=cost,
+        )
+
+    r = client.get("/api/forecast?window_hours=24")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["observed_cost_usd"] == 0.0
+    assert data["hourly_rate_usd"] == 0.0
+    assert data["projection_24h_usd"] == 0.0
+    assert data["projection_7d_usd"] == 0.0
+    assert data["projection_30d_usd"] == 0.0
+    # The rows are still counted — only the cost was clamped.
+    assert data["observed_session_count"] == 3
