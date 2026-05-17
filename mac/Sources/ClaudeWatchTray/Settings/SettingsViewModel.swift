@@ -103,8 +103,8 @@ final class SettingsViewModel: ObservableObject {
 
     /// `UserDefaults` keys for the Sparkle preferences. Constants so the
     /// tests can reach in and reset / inspect state.
-    static let updatesEnabledKey = "com.omeryasironal.claudewatch.update.enabled"
-    static let updatesFrequencyKey = "com.omeryasironal.claudewatch.update.frequencyHours"
+    nonisolated static let updatesEnabledKey = "com.omeryasironal.claudewatch.update.enabled"
+    nonisolated static let updatesFrequencyKey = "com.omeryasironal.claudewatch.update.frequencyHours"
 
     /// Re-read Sparkle preferences from UserDefaults. First-run defaults
     /// match `UpdatesConfig()` — disabled, weekly cadence.

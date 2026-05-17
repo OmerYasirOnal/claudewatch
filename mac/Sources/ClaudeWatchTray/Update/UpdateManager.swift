@@ -64,7 +64,7 @@ final class UpdateManager: NSObject, ObservableObject {
 
     /// `UserDefaults` key for `lastChecked`. Kept as a constant so tests can
     /// reach in and inspect/clear it.
-    static let lastCheckedDefaultsKey = "com.omeryasironal.claudewatch.update.lastChecked"
+    nonisolated static let lastCheckedDefaultsKey = "com.omeryasironal.claudewatch.update.lastChecked"
 
     /// Whether `start(...)` has already wired up Sparkle. Idempotent guard so
     /// repeated calls (e.g. when the user re-saves Settings) just update the
