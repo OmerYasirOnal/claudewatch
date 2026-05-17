@@ -1,0 +1,55 @@
+# Dependabot configuration.
+#
+# We don't wire up swift-package here: Dependabot's Swift Package Manager
+# support is limited (no version updates for path-based deps, no support for
+# many manifest patterns we use), so mac/Package.swift is bumped by hand for
+# now. Revisit when GitHub upgrades the SPM ecosystem.
+#
+# bundler / npm / docker / gomod: none — this repo has no Gemfile, no
+# package.json, no Dockerfile, no Go modules.
+
+version: 2
+updates:
+  # Python deps declared in pyproject.toml.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      python-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions used by .github/workflows/{ci,mac-ci,release}.yml.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch

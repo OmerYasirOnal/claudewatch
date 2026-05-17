@@ -1,0 +1,10 @@
+# Funding configuration for the "Sponsor" button on the repo page.
+#
+# No funding sources are wired up today. To enable later, uncomment one or
+# more of the keys below and fill in the handle. See:
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+#
+# github: [OmerYasirOnal]
+# ko_fi: <username>
+# buy_me_a_coffee: <username>
+# custom: ["https://example.com/donate"]
