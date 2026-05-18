@@ -22,7 +22,7 @@ dependencies = [
   "tomli>=2.0; python_version < '3.11'",
   "pydantic>=2.10",
   "rich>=13.9",
-  "typer>=0.15",
+  "typer>=0.25.1",
 ]
 
 [project.optional-dependencies]
